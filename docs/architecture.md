@@ -107,11 +107,25 @@ auth model and duplicated write logic; the integration boundary stays HTTP.
 
 ## Root and privileges
 
-v0.1 runs the agent as root because it drives systemctl. A tighter setup is
-possible via polkit rules for `org.freedesktop.systemd1` restricted to the
-`rtl-*`/`spyserver` units, or a `sudoers` whitelist for
-`systemctl {start,stop,restart,enable,disable} rtl-*` — planned, not required
-for the appliance.
+The agent runs as root (it drives systemctl). The CLI works without sudo for
+the operator user via `polkit/50-sdrctl.rules` + membership in the
+`systemd-journal` group (for `sdrctl logs`); read commands need no privileges
+at all once D-Bus is present.
+
+Findings from the first deployment (systemd 257 / polkitd 126):
+
+- `manage-units` (start/stop/restart/reset-failed) carries the unit name in
+  polkit details → scoped strictly to the SDR units.
+- `manage-unit-files` (enable/disable) carries **no details at all** (neither
+  unit nor verb), so per-unit scoping is impossible; the rule grants it
+  wholesale to the operator user. Acceptable on a single-operator appliance:
+  creating unit files still requires root.
+- A `sudoers` whitelist of `systemctl ... rtl-*` was rejected: sudoers
+  wildcards match spaces, so such a pattern also permits extra arguments.
+
+Planned for v0.2: when the agent is running, the CLI talks to the local HTTP
+API instead of calling systemctl itself — single writer, no polkit rule
+needed for mode changes.
 
 ## Multi-client rtl_tcp (future, separate project)
 

@@ -47,7 +47,22 @@ systemctl enable --now sdrctl-agent
 `rtl-433.service` / `spyserver.service` are optional; while absent they show
 as `not-installed` and break nothing.
 
-## 4. Acceptance check
+## 4. No-sudo CLI for the operator user (optional)
+
+To let the operator user run every sdrctl command (including `mode set`)
+without sudo:
+
+```bash
+apt install -y polkitd
+cp polkit/50-sdrctl.rules /etc/polkit-1/rules.d/   # adjust the user name inside
+systemctl restart polkit
+usermod -aG systemd-journal <user>                 # for sdrctl logs; re-login
+```
+
+See "Root and privileges" in docs/architecture.md for what exactly the rule
+grants and why enable/disable cannot be scoped per unit.
+
+## 5. Acceptance check
 
 ```bash
 sdrctl status
@@ -66,7 +81,7 @@ curl http://127.0.0.1:8081/mode
 Reboot test: set a mode, reboot — the mode must come back by itself (desired
 state = enabled units; sdrctl needs no init/restore step).
 
-## 5. Multiple dongles
+## 6. Multiple dongles
 
 **Mandatory first step:** RTL-SDR Blog V4 dongles all ship with the same USB
 serial `00000001`. With two identical serials neither sdrctl nor rtl_tcp can
@@ -89,7 +104,7 @@ Then:
 4. `systemctl daemon-reload`, then `sdrctl device <id> mode set rtl-tcp`.
 5. Optional stop-on-unplug binding: see `udev/99-sdrctl-rtlsdr.rules`.
 
-## 6. Optional: MQTT and write API
+## 7. Optional: MQTT and write API
 
 - MQTT telemetry: set `mqtt.enabled: true` and `mqtt.broker`, restart the
   agent, subscribe to `sdr/wyse-sdr-01/#`.
