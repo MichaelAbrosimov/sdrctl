@@ -10,6 +10,7 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -76,7 +77,7 @@ type Snapshot struct {
 }
 
 // BuildSnapshot derives the full node state from systemd and sysfs.
-func BuildSnapshot(cfg *config.Config, sd *systemd.Client) Snapshot {
+func BuildSnapshot(ctx context.Context, cfg *config.Config, sd *systemd.Client) Snapshot {
 	snap := Snapshot{
 		Node:        cfg.Node.ID,
 		Role:        cfg.Node.Role,
@@ -90,7 +91,7 @@ func BuildSnapshot(cfg *config.Config, sd *systemd.Client) Snapshot {
 
 	seenIDPairs := map[string]bool{}
 	for _, dc := range cfg.Devices {
-		ds := buildDevice(dc, sd, usb, presenceKnown)
+		ds := buildDevice(ctx, dc, sd, usb, presenceKnown)
 		snap.Devices = append(snap.Devices, ds)
 
 		if ds.Mode != ModeIdle && ds.Mode != ModeConflict && ds.Mode != ModeUnknown &&
@@ -117,7 +118,7 @@ func BuildSnapshot(cfg *config.Config, sd *systemd.Client) Snapshot {
 	return snap
 }
 
-func buildDevice(dc config.DeviceConfig, sd *systemd.Client, usb []device.USBDevice, presenceKnown bool) DeviceStatus {
+func buildDevice(ctx context.Context, dc config.DeviceConfig, sd *systemd.Client, usb []device.USBDevice, presenceKnown bool) DeviceStatus {
 	ds := DeviceStatus{
 		ID:            dc.ID,
 		Type:          dc.Type,
@@ -133,7 +134,7 @@ func buildDevice(dc config.DeviceConfig, sd *systemd.Client, usb []device.USBDev
 	var running, enabled []string
 	anyUnknown := false
 	for name, sc := range dc.Services {
-		st := sd.UnitStatus(sc.Systemd)
+		st := sd.UnitStatus(ctx, sc.Systemd)
 		ds.Services[name] = st.Active
 		ds.ServiceInfo[name] = ServiceDetail{
 			Unit:     sc.Systemd,
@@ -245,11 +246,11 @@ func aggregate(devices []DeviceStatus) (bool, string) {
 }
 
 // DeviceModes returns the actual and desired mode of one device.
-func DeviceModes(sd *systemd.Client, dev *config.DeviceConfig) (actual, desired string) {
+func DeviceModes(ctx context.Context, sd *systemd.Client, dev *config.DeviceConfig) (actual, desired string) {
 	var running, enabled []string
 	anyUnknown := false
 	for name, sc := range dev.Services {
-		st := sd.UnitStatus(sc.Systemd)
+		st := sd.UnitStatus(ctx, sc.Systemd)
 		if st.Active == "unknown" {
 			anyUnknown = true
 		}
@@ -282,11 +283,26 @@ func ModeNames(dev *config.DeviceConfig) []string {
 	return append(names, ModeIdle)
 }
 
+// verifyPollInterval is the pause between verification reads in SetMode.
+const verifyPollInterval = 300 * time.Millisecond
+
 // SetMode switches a device to the target mode through systemd only:
 // competing units are disabled (disable --now), the target unit is enabled
 // (enable --now), then the outcome is verified. Desired state lives in the
 // units' enabled flags — nothing is written anywhere else.
-func SetMode(sd *systemd.Client, dev *config.DeviceConfig, target string, timeout time.Duration) (SetModeResult, error) {
+//
+// The timeout bounds the WHOLE transition — status reads, disable/enable and
+// verification — so a hung systemctl cannot hold the caller (and the agent's
+// inflight guard) past the deadline: CommandContext kills the child.
+//
+// Success requires BOTH coordinates to converge: actual (ActiveState) and
+// desired (enabled flags). A competitor left enabled, or a target that runs
+// without being enabled, is a failed transition — it would resurrect the
+// wrong mode after a reboot.
+func SetMode(ctx context.Context, sd *systemd.Client, dev *config.DeviceConfig, target string, timeout time.Duration) (SetModeResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	res := SetModeResult{Device: dev.ID, RequestedMode: target}
 
 	var targetUnit string
@@ -297,73 +313,64 @@ func SetMode(sd *systemd.Client, dev *config.DeviceConfig, target string, timeou
 				target, strings.Join(ModeNames(dev), ", "))
 		}
 		targetUnit = sc.Systemd
-		if sd.UnitStatus(targetUnit).Load == "not-found" {
+		if sd.UnitStatus(ctx, targetUnit).Load == "not-found" {
 			return res, fmt.Errorf("mode %q is not installed: unit %s not found", target, targetUnit)
 		}
 	}
 
-	actual, desired := DeviceModes(sd, dev)
+	actual, desired := DeviceModes(ctx, sd, dev)
 	if actual == target && desired == target {
 		res.Mode = target
 		return res, nil
 	}
 
 	// Stop and un-desire every other SDR service of this device. Missing
-	// optional units are skipped, they are not an error.
+	// optional units are skipped; any other disable failure aborts the
+	// transition — a competitor left enabled would bring the old mode back
+	// after a reboot.
 	for name, sc := range dev.Services {
 		if name == target {
 			continue
 		}
-		st := sd.UnitStatus(sc.Systemd)
-		if st.Load == "not-found" {
+		if sd.UnitStatus(ctx, sc.Systemd).Load == "not-found" {
 			continue
 		}
-		if err := sd.DisableNow(sc.Systemd); err != nil && st.IsRunning() {
-			return res, fmt.Errorf("stop %s: %w", sc.Systemd, err)
+		if err := sd.DisableNow(ctx, sc.Systemd); err != nil {
+			return res, fmt.Errorf("disable %s: %w", sc.Systemd, err)
 		}
 	}
 
 	if target != ModeIdle {
 		// Clear a possible StartLimit throttle from earlier failures.
-		_ = sd.ResetFailed(targetUnit)
-		if err := sd.EnableNow(targetUnit); err != nil {
+		_ = sd.ResetFailed(ctx, targetUnit)
+		if err := sd.EnableNow(ctx, targetUnit); err != nil {
 			return res, fmt.Errorf("enable %s: %w", targetUnit, err)
 		}
 	}
 	res.Changed = true
 
-	deadline := time.Now().Add(timeout)
 	for {
-		if target == ModeIdle {
-			allStopped := true
-			for _, sc := range dev.Services {
-				st := sd.UnitStatus(sc.Systemd)
-				if st.IsRunning() {
-					allStopped = false
-					break
-				}
-			}
-			if allStopped {
-				res.Mode = ModeIdle
-				return res, nil
-			}
-		} else {
-			st := sd.UnitStatus(targetUnit)
-			switch st.Active {
-			case "active":
-				res.Mode = target
-				return res, nil
-			case "failed":
-				return res, fmt.Errorf("unit %s failed to start; see: journalctl -u %s -n 50",
-					targetUnit, targetUnit)
-			}
+		actual, desired := DeviceModes(ctx, sd, dev)
+		if actual == target && desired == target {
+			res.Mode = target
+			return res, nil
 		}
-		if time.Now().After(deadline) {
-			cur, _ := DeviceModes(sd, dev)
+		if target != ModeIdle && sd.UnitStatus(ctx, targetUnit).Active == "failed" {
+			return res, fmt.Errorf("unit %s failed to start; see: journalctl -u %s -n 50",
+				targetUnit, targetUnit)
+		}
+		select {
+		case <-ctx.Done():
+			// Report the state as seen at the deadline; the expired context
+			// cannot serve one more read, so take a short fresh one.
+			readCtx, readCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+			cur, curDesired := DeviceModes(readCtx, sd, dev)
+			readCancel()
 			res.Mode = cur
-			return res, fmt.Errorf("timed out waiting for mode %q (current: %s)", target, cur)
+			return res, fmt.Errorf("timed out waiting for mode %q (current: %s, desired: %s)",
+				target, cur, curDesired)
+		case <-time.After(verifyPollInterval):
 		}
-		time.Sleep(300 * time.Millisecond)
 	}
 }
 

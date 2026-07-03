@@ -28,18 +28,37 @@ const (
 	writeMargin = 5 * time.Second
 )
 
-// Unavailable marks transport-level failures where the agent could not be
-// reached at all.
+// Unavailable marks failures where it is safe for the caller to fall back:
+// the request provably never reached the agent (dial error), or it was a
+// read — reads are side-effect-free and the local fallback is equivalent.
 type Unavailable struct{ Err error }
 
 func (u Unavailable) Error() string { return u.Err.Error() }
 func (u Unavailable) Unwrap() error { return u.Err }
 
-// IsUnavailable reports whether err means "agent unreachable" (fallback is
-// appropriate) as opposed to an answer from a running agent.
+// IsUnavailable reports whether err means "agent unreachable, fallback safe"
+// as opposed to an answer from a running agent or an ambiguous write outcome.
 func IsUnavailable(err error) bool {
 	var u Unavailable
 	return errors.As(err, &u)
+}
+
+// classify decides what a transport error means for the caller. Dial errors
+// are always Unavailable — no bytes were sent, no mutation started. Errors
+// after that (timeout awaiting the reply, connection dropped mid-response)
+// are Unavailable only for reads; for writes the transition may still be
+// running inside the agent, so falling back would create a second executor —
+// exactly the situation the socket-first design exists to prevent.
+func classify(method string, err error) error {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return Unavailable{Err: err}
+	}
+	if method == http.MethodGet {
+		return Unavailable{Err: err}
+	}
+	return fmt.Errorf(
+		"agent: request outcome unknown (%v) — the transition may still be running; NOT falling back, check 'sdrctl status' before retrying", err)
 }
 
 type Client struct {
@@ -87,12 +106,12 @@ func (c *Client) do(hc *http.Client, method, path string, out any) error {
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return Unavailable{Err: err}
+		return classify(method, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return Unavailable{Err: err}
+		return classify(method, err)
 	}
 	if resp.StatusCode >= 300 {
 		var e struct {

@@ -84,7 +84,7 @@
 ### SDR-P1-02 — ошибка `disable --now` может быть проигнорирована, а переход признан успешным
 
 - **Автор:** Codex
-- **Статус:** Подтверждено (Claude), к исправлению
+- **Статус:** Реализовано Claude (пакет 1) — ожидает ревью Codex/Michael
 - **Код:** `internal/core/core.go:311-364`
 
 Ошибка `DisableNow` возвращается только если конкурентный юнит считался
@@ -116,7 +116,7 @@ per-verb (см. SDR-P3-03).
 ### SDR-P1-03 — `mode_set_timeout_sec` не ограничивает полный переход
 
 - **Автор:** Codex
-- **Статус:** Подтверждено (Claude), к исправлению — приоритет №1
+- **Статус:** Реализовано Claude (пакет 1) — ожидает ревью Codex/Michael
 - **Код:** `internal/systemd/systemd.go:32-40`,
   `internal/core/core.go:289-366`, `internal/api/api.go:281-311`,
   `internal/agentclient/client.go:53-63`
@@ -489,6 +489,25 @@ dev-Mac (toolchain с поддержкой race) — пройдено. Огов�
 5. Сериализовать observer refresh и защитить singleton socket.
 6. После этого закрыть auto-restore/config validation и расширить regression
    tests.
+
+**Ход исправлений (обновляется):**
+
+- **Пакет 1 (SDR-P1-02 + SDR-P1-03) — реализован, ожидает ревью.** Состав:
+  context сквозь весь путь (`systemd.Runner` теперь ctx-aware,
+  `exec.CommandContext`); `core.SetMode` берёт `context.WithTimeout` ДО первого
+  вызова systemctl — дедлайн покрывает чтения, disable/enable и верификацию,
+  зависший systemctl убивается; любая ошибка disable установленного юнита =
+  ошибка перехода; успех = `actual == target && desired == target` через
+  `DeviceModes` (для idle — всё inactive И disabled); в `agentclient` функция
+  `classify`: dial-ошибка → `Unavailable` (fallback безопасен), ошибка после
+  отправленного write → обычная ошибка «outcome unknown, check sdrctl status»
+  без fallback, для read'ов fallback остаётся всегда. Общий программируемый
+  fake — `internal/systemd/systemdtest` (per-verb errors, per-verb hang,
+  sticky-enabled disable); core_test и api_test переведены на него. Новые
+  тесты: падающий disable, конкурент остался enabled, idle требует disabled,
+  зависший systemctl возвращает управление за дедлайн, inflight освобождается
+  после таймаута (нет ложного 409), классификация dial/ambiguous/read.
+  `go test -race -count=1 ./...` — пройдено.
 
 **Согласование Claude:** с порядком согласен, два уточнения. (1) Пакет №1 —
 это SDR-P1-02 + SDR-P1-03 вместе с клиентской частью (не-fallback после

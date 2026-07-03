@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+
 	"github.com/MichaelAbrosimov/sdrctl/internal/agentclient"
 	"github.com/MichaelAbrosimov/sdrctl/internal/config"
 	"github.com/MichaelAbrosimov/sdrctl/internal/core"
@@ -16,5 +18,5 @@ func agentSnapshot(cfg *config.Config) (core.Snapshot, bool) {
 	if snap, err := agentclient.New(cfg.Socket.Path, cfg.ModeSetTimeout()).Status(); err == nil {
 		return snap, true
 	}
-	return core.BuildSnapshot(cfg, systemd.New()), false
+	return core.BuildSnapshot(context.Background(), cfg, systemd.New()), false
 }

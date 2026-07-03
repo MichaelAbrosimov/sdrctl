@@ -8,6 +8,7 @@ package systemd
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -18,8 +19,9 @@ import (
 const NotInstalled = "not-installed"
 
 // Runner executes a command and returns its combined output. It exists so
-// tests can substitute a fake systemctl.
-type Runner func(name string, args ...string) (string, error)
+// tests can substitute a fake systemctl. The context bounds the execution:
+// a hung systemctl is killed when the context expires.
+type Runner func(ctx context.Context, name string, args ...string) (string, error)
 
 type Client struct {
 	run Runner
@@ -29,12 +31,17 @@ func New() *Client { return &Client{run: runCommand} }
 
 func NewWithRunner(r Runner) *Client { return &Client{run: r} }
 
-func runCommand(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+func runCommand(ctx context.Context, name string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 	if err := cmd.Run(); err != nil {
+		// Prefer the context error: "deadline exceeded" says more than
+		// "signal: killed" left behind by CommandContext.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			err = ctxErr
+		}
 		return buf.String(), fmt.Errorf("%s %s: %w: %s",
 			name, strings.Join(args, " "), err, strings.TrimSpace(buf.String()))
 	}
@@ -53,9 +60,9 @@ type UnitStatus struct {
 
 // UnitStatus queries a single unit. Errors degrade to "unknown" fields so a
 // host without systemd (e.g. a dev machine) still gets a usable answer.
-func (c *Client) UnitStatus(unit string) UnitStatus {
+func (c *Client) UnitStatus(ctx context.Context, unit string) UnitStatus {
 	st := UnitStatus{Unit: unit, Load: "unknown", Active: "unknown", Enabled: "unknown"}
-	out, err := c.run("systemctl", "show", unit, "--no-pager",
+	out, err := c.run(ctx, "systemctl", "show", unit, "--no-pager",
 		"-p", "LoadState,ActiveState,UnitFileState,NRestarts,ActiveEnterTimestamp")
 	if err != nil {
 		return st
@@ -99,30 +106,30 @@ func (u UnitStatus) IsRunning() bool {
 }
 
 // EnableNow marks the unit as desired and starts it (enable --now).
-func (c *Client) EnableNow(unit string) error {
-	_, err := c.run("systemctl", "enable", "--now", unit)
+func (c *Client) EnableNow(ctx context.Context, unit string) error {
+	_, err := c.run(ctx, "systemctl", "enable", "--now", unit)
 	return err
 }
 
 // DisableNow clears the desired flag and stops the unit (disable --now).
-func (c *Client) DisableNow(unit string) error {
-	_, err := c.run("systemctl", "disable", "--now", unit)
+func (c *Client) DisableNow(ctx context.Context, unit string) error {
+	_, err := c.run(ctx, "systemctl", "disable", "--now", unit)
 	return err
 }
 
-func (c *Client) Restart(unit string) error {
-	_, err := c.run("systemctl", "restart", unit)
+func (c *Client) Restart(ctx context.Context, unit string) error {
+	_, err := c.run(ctx, "systemctl", "restart", unit)
 	return err
 }
 
 // ResetFailed clears the failed state so a unit throttled by StartLimit can
 // be started again.
-func (c *Client) ResetFailed(unit string) error {
-	_, err := c.run("systemctl", "reset-failed", unit)
+func (c *Client) ResetFailed(ctx context.Context, unit string) error {
+	_, err := c.run(ctx, "systemctl", "reset-failed", unit)
 	return err
 }
 
 // Logs returns the last n journal lines of a unit.
-func (c *Client) Logs(unit string, n int) (string, error) {
-	return c.run("journalctl", "-u", unit, "-n", strconv.Itoa(n), "--no-pager")
+func (c *Client) Logs(ctx context.Context, unit string, n int) (string, error) {
+	return c.run(ctx, "journalctl", "-u", unit, "-n", strconv.Itoa(n), "--no-pager")
 }

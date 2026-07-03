@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sort"
@@ -78,7 +79,8 @@ func init() {
 }
 
 func deviceLogs(sd *systemd.Client, dev *config.DeviceConfig, n int) error {
-	actual, _ := core.DeviceModes(sd, dev)
+	ctx := context.Background()
+	actual, _ := core.DeviceModes(ctx, sd, dev)
 	switch actual {
 	case core.ModeIdle, core.ModeConflict, core.ModeUnknown:
 		units := make([]string, 0, len(dev.Services))
@@ -89,7 +91,7 @@ func deviceLogs(sd *systemd.Client, dev *config.DeviceConfig, n int) error {
 		return fmt.Errorf("device %s has no single active SDR service (mode: %s); inspect directly: journalctl -u <unit> — units: %s",
 			dev.ID, actual, strings.Join(units, ", "))
 	}
-	out, err := sd.Logs(dev.Services[actual].Systemd, n)
+	out, err := sd.Logs(ctx, dev.Services[actual].Systemd, n)
 	if err != nil {
 		return err
 	}

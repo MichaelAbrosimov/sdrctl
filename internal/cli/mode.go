@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -82,7 +83,7 @@ func runModeSet(cfg *config.Config, dev *config.DeviceConfig, target string) err
 		return fmt.Errorf("%s: %w", dev.ID, err)
 	}
 
-	res, err = core.SetMode(systemd.New(), dev, target, cfg.ModeSetTimeout())
+	res, err = core.SetMode(context.Background(), systemd.New(), dev, target, cfg.ModeSetTimeout())
 	if err != nil {
 		return fmt.Errorf("%s: %w", dev.ID, err)
 	}

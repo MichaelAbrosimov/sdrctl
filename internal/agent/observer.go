@@ -52,8 +52,10 @@ func (o *Observer) Latest() core.Snapshot {
 }
 
 // Refresh rebuilds the snapshot and notifies listeners when it changed.
+// Reads use a background context: a snapshot in progress is cheap and may
+// finish even while the agent is shutting down.
 func (o *Observer) Refresh() core.Snapshot {
-	cur := core.BuildSnapshot(o.cfg, o.sd)
+	cur := core.BuildSnapshot(context.Background(), o.cfg, o.sd)
 
 	o.mu.Lock()
 	prev, had := o.last, o.haveLast
@@ -75,7 +77,7 @@ func (o *Observer) Run(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		snap := o.Refresh()
-		o.autoRestore(snap)
+		o.autoRestore(ctx, snap)
 		select {
 		case <-ctx.Done():
 			return
@@ -84,7 +86,7 @@ func (o *Observer) Run(ctx context.Context) {
 	}
 }
 
-func (o *Observer) autoRestore(s core.Snapshot) {
+func (o *Observer) autoRestore(ctx context.Context, s core.Snapshot) {
 	if !o.cfg.Observer.AutoRestore {
 		return
 	}
@@ -109,9 +111,13 @@ func (o *Observer) autoRestore(s core.Snapshot) {
 		o.lastRestore[d.ID] = time.Now()
 		log.Printf("supervisor: device %s degraded (desired %s), restarting %s",
 			d.ID, d.DesiredMode, det.Unit)
-		_ = o.sd.ResetFailed(det.Unit)
-		if err := o.sd.Restart(det.Unit); err != nil {
+		// Each attempt is bounded like a mode transition, so a hung
+		// systemctl cannot stall the observer loop.
+		attemptCtx, cancel := context.WithTimeout(ctx, o.cfg.ModeSetTimeout())
+		_ = o.sd.ResetFailed(attemptCtx, det.Unit)
+		if err := o.sd.Restart(attemptCtx, det.Unit); err != nil {
 			log.Printf("supervisor: restart %s: %v", det.Unit, err)
 		}
+		cancel()
 	}
 }

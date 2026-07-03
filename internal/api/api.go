@@ -7,6 +7,7 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -112,13 +113,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.obs.Latest())
 }
 
-func (s *Server) handleMode(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
 	dev, err := s.cfg.DefaultDevice()
 	if err != nil {
 		writeErr(w, http.StatusConflict, "%v", err)
 		return
 	}
-	actual, desired := core.DeviceModes(s.sd, dev)
+	actual, desired := core.DeviceModes(r.Context(), s.sd, dev)
 	writeJSON(w, http.StatusOK, map[string]string{
 		"device": dev.ID, "mode": actual, "desired_mode": desired,
 	})
@@ -245,7 +246,7 @@ func (s *Server) setMode(w http.ResponseWriter, r *http.Request, id, mode string
 	}
 
 	// Idempotency: requesting the current desired+actual mode is a no-op.
-	actual, desired := core.DeviceModes(s.sd, dev)
+	actual, desired := core.DeviceModes(r.Context(), s.sd, dev)
 	if actual == mode && desired == mode {
 		writeJSON(w, http.StatusOK, core.SetModeResult{
 			Device: id, RequestedMode: mode, Mode: mode, Changed: false,
@@ -264,7 +265,9 @@ func (s *Server) setMode(w http.ResponseWriter, r *http.Request, id, mode string
 			// Publish the outcome (MQTT + fresh /status) right away.
 			s.obs.Refresh()
 		}()
-		if _, err := core.SetMode(s.sd, dev, mode, s.cfg.ModeSetTimeout()); err != nil {
+		// Deliberately not the request context: an accepted transition must
+		// finish even if the caller disconnects; SetMode bounds itself.
+		if _, err := core.SetMode(context.Background(), s.sd, dev, mode, s.cfg.ModeSetTimeout()); err != nil {
 			log.Printf("api: mode set %s/%s failed: %v", id, mode, err)
 		} else {
 			log.Printf("api: device %s switched to mode %s", id, mode)
@@ -286,7 +289,7 @@ func (s *Server) setModeSync(w http.ResponseWriter, id, mode string) {
 		return
 	}
 
-	actual, desired := core.DeviceModes(s.sd, dev)
+	actual, desired := core.DeviceModes(context.Background(), s.sd, dev)
 	if actual == mode && desired == mode {
 		writeJSON(w, http.StatusOK, core.SetModeResult{
 			Device: id, RequestedMode: mode, Mode: mode, Changed: false,
@@ -300,7 +303,10 @@ func (s *Server) setModeSync(w http.ResponseWriter, id, mode string) {
 	}
 	defer s.release(id)
 
-	res, err := core.SetMode(s.sd, dev, mode, s.cfg.ModeSetTimeout())
+	// Not the request context: even on the synchronous socket path a started
+	// transition must run to completion if the CLI disconnects — the client
+	// timeout is longer than SetMode's own deadline, which bounds this call.
+	res, err := core.SetMode(context.Background(), s.sd, dev, mode, s.cfg.ModeSetTimeout())
 	s.obs.Refresh()
 	if err != nil {
 		log.Printf("socket: mode set %s/%s failed: %v", id, mode, err)
