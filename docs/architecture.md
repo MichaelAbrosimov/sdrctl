@@ -123,9 +123,12 @@ Findings from the first deployment (systemd 257 / polkitd 126):
 - A `sudoers` whitelist of `systemctl ... rtl-*` was rejected: sudoers
   wildcards match spaces, so such a pattern also permits extra arguments.
 
-Planned for v0.2: when the agent is running, the CLI talks to the local HTTP
-API instead of calling systemctl itself — single writer, no polkit rule
-needed for mode changes.
+This is the permanent privilege model (decided 2026-07-03), not an interim
+step: the CLI always drives systemd directly, so the node stays controllable
+even when the agent is down, and there is no writer conflict by construction —
+CLI and agent both converge on the same desired state stored in systemd. The
+HTTP write API remains the integration path for external callers
+(sdr-manager), not a replacement for the local CLI.
 
 ## Multi-client rtl_tcp (future, separate project)
 
