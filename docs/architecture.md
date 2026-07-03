@@ -123,12 +123,16 @@ Findings from the first deployment (systemd 257 / polkitd 126):
 - A `sudoers` whitelist of `systemctl ... rtl-*` was rejected: sudoers
   wildcards match spaces, so such a pattern also permits extra arguments.
 
-This is the permanent privilege model (decided 2026-07-03), not an interim
-step: the CLI always drives systemd directly, so the node stays controllable
-even when the agent is down, and there is no writer conflict by construction —
-CLI and agent both converge on the same desired state stored in systemd. The
-HTTP write API remains the integration path for external callers
-(sdr-manager), not a replacement for the local CLI.
+Agreed direction for v0.2 (2026-07-03) — socket-first CLI, docker/tailscale
+style: the agent additionally listens on a unix socket
+(`/run/sdrctl/sdrctl.sock`, `root:sdrctl` 0660 — file permissions instead of
+a token) where read AND write endpoints are always available, independent of
+the network API. `sdrctl mode set` prefers the socket (agent becomes the
+single executor of transitions); when the agent is down the CLI falls back to
+driving systemctl directly with a warning — the node must stay controllable
+during recovery. The polkit rule therefore stays permanently as the fallback
+path's privilege mechanism. The network write API (token) remains the
+integration path for external callers such as sdr-manager.
 
 ## Multi-client rtl_tcp (future, separate project)
 
