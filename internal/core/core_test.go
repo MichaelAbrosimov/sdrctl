@@ -228,3 +228,51 @@ func TestSetModeDeadlineCoversHungSystemctl(t *testing.T) {
 		t.Errorf("SetMode held the caller for %v; the deadline did not cover the hung call", elapsed)
 	}
 }
+
+// SDR-P1-03 review item 3: the configured timeout is the upper bound of the
+// whole call — cleanup and the diagnostic read live INSIDE it, not on top.
+func TestSetModeRespectsConfiguredUpperBound(t *testing.T) {
+	f := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "inactive", Enabled: "disabled"},
+	})
+	f.HangVerb("enable")
+
+	timeout := 500 * time.Millisecond
+	start := time.Now()
+	_, err := SetMode(context.Background(), f.Client(), testDevice(), "rtl-tcp", timeout)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	// Generous slack for scheduler jitter only — NOT for extra I/O windows.
+	if elapsed > timeout+300*time.Millisecond {
+		t.Errorf("SetMode took %v, exceeding the configured upper bound %v", elapsed, timeout)
+	}
+}
+
+// SDR-P1-03 review item 2: killing the systemctl client does not remove a
+// job it already enqueued in PID 1 — SetMode must cancel pending jobs of
+// the device before reporting failure, or a queued start could land after
+// the inflight guard is released.
+func TestSetModeCancelsPendingJobsOnTimeout(t *testing.T) {
+	f := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "inactive", Enabled: "disabled"},
+	})
+	f.HangVerb("enable")
+	f.LingerJob("enable") // the enqueued start job survives the killed client
+
+	_, err := SetMode(context.Background(), f.Client(), testDevice(), "rtl-tcp", time.Second)
+	if err == nil {
+		t.Fatal("expected a timeout error")
+	}
+	if !strings.Contains(strings.Join(f.Calls(), "\n"), "systemctl cancel") {
+		t.Error("SetMode did not try to cancel the pending job")
+	}
+
+	// Whatever PID 1 still holds now lands; a cancelled job must not.
+	f.CompleteJobs()
+	if u := f.Unit("rtl-tcp.service"); u.Active == "active" || u.Enabled == "enabled" {
+		t.Errorf("queued job landed after the reported failure: %+v", u)
+	}
+}

@@ -22,6 +22,11 @@ import (
 	"github.com/MichaelAbrosimov/sdrctl/internal/systemd"
 )
 
+// preflightTimeout bounds the network API's synchronous no-op probe, so a
+// hung systemctl cannot hold the handler: on timeout the probe reads
+// unknown, the request proceeds to the (itself bounded) transition.
+const preflightTimeout = 5 * time.Second
+
 type Server struct {
 	cfg *config.Config
 	sd  *systemd.Client
@@ -29,11 +34,20 @@ type Server struct {
 
 	mu       sync.Mutex
 	inflight map[string]bool
+	// wg tracks in-flight transitions so agent shutdown can drain them;
+	// each is bounded by ModeSetTimeout, so the wait is finite.
+	wg sync.WaitGroup
 }
 
 func New(cfg *config.Config, sd *systemd.Client, obs *agent.Observer) *Server {
 	return &Server{cfg: cfg, sd: sd, obs: obs, inflight: map[string]bool{}}
 }
+
+// WaitTransitions blocks until every in-flight transition finishes. Called
+// on agent shutdown: started transitions are deliberately not cancelled
+// (systemd would complete their jobs anyway), and each is self-bounded by
+// ModeSetTimeout, so this returns within that bound.
+func (s *Server) WaitTransitions() { s.wg.Wait() }
 
 // Handler returns the network API: read endpoints plus token-gated async
 // write endpoints (202 Accepted).
@@ -245,8 +259,12 @@ func (s *Server) setMode(w http.ResponseWriter, r *http.Request, id, mode string
 		return
 	}
 
-	// Idempotency: requesting the current desired+actual mode is a no-op.
-	actual, desired := core.DeviceModes(r.Context(), s.sd, dev)
+	// Idempotency probe for the 200-no-op/202-accepted contract, bounded so
+	// a hung systemctl cannot hold the handler. On probe timeout the modes
+	// read unknown and the request just proceeds to the bounded transition.
+	probeCtx, probeCancel := context.WithTimeout(r.Context(), preflightTimeout)
+	actual, desired := core.DeviceModes(probeCtx, s.sd, dev)
+	probeCancel()
 	if actual == mode && desired == mode {
 		writeJSON(w, http.StatusOK, core.SetModeResult{
 			Device: id, RequestedMode: mode, Mode: mode, Changed: false,
@@ -259,9 +277,11 @@ func (s *Server) setMode(w http.ResponseWriter, r *http.Request, id, mode string
 		return
 	}
 
+	s.wg.Add(1)
 	go func() {
 		defer func() {
 			s.release(id)
+			s.wg.Done()
 			// Publish the outcome (MQTT + fresh /status) right away.
 			s.obs.Refresh()
 		}()
@@ -289,19 +309,17 @@ func (s *Server) setModeSync(w http.ResponseWriter, id, mode string) {
 		return
 	}
 
-	actual, desired := core.DeviceModes(context.Background(), s.sd, dev)
-	if actual == mode && desired == mode {
-		writeJSON(w, http.StatusOK, core.SetModeResult{
-			Device: id, RequestedMode: mode, Mode: mode, Changed: false,
-		})
-		return
-	}
-
+	// No idempotency preflight here: SetMode performs the same check inside
+	// its own deadline. A separate unbounded probe would let a hung
+	// systemctl hold this handler before it ever reaches claim/SetMode.
 	if !s.claim(id) {
 		writeErr(w, http.StatusConflict, "mode change already in progress for device %s", id)
 		return
 	}
 	defer s.release(id)
+
+	s.wg.Add(1)
+	defer s.wg.Done()
 
 	// Not the request context: even on the synchronous socket path a started
 	// transition must run to completion if the CLI disconnects — the client

@@ -291,17 +291,30 @@ const verifyPollInterval = 300 * time.Millisecond
 // (enable --now), then the outcome is verified. Desired state lives in the
 // units' enabled flags — nothing is written anywhere else.
 //
-// The timeout bounds the WHOLE transition — status reads, disable/enable and
-// verification — so a hung systemctl cannot hold the caller (and the agent's
-// inflight guard) past the deadline: CommandContext kills the child.
+// The timeout is the caller-visible upper bound of the WHOLE call: a slice
+// of it (a fifth, at most 2s) is reserved up front for failure cleanup, the
+// rest bounds status reads, disable/enable and verification. A hung
+// systemctl cannot hold the caller (and the agent's inflight guard) past the
+// deadline: CommandContext kills the child. Killing systemctl does NOT
+// remove a job it already enqueued in PID 1, so the cleanup slice cancels
+// pending jobs of this device's units — otherwise a queued start/stop could
+// land after the inflight guard is released. Cleanup is best-effort: with a
+// dead D-Bus the cancel fails too, which is logged by the caller via the
+// returned error.
 //
 // Success requires BOTH coordinates to converge: actual (ActiveState) and
 // desired (enabled flags). A competitor left enabled, or a target that runs
 // without being enabled, is a failed transition — it would resurrect the
 // wrong mode after a reboot.
 func SetMode(ctx context.Context, sd *systemd.Client, dev *config.DeviceConfig, target string, timeout time.Duration) (SetModeResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	reserve := timeout / 5
+	if reserve > 2*time.Second {
+		reserve = 2 * time.Second
+	}
+	overall, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	transCtx, transCancel := context.WithDeadline(overall, time.Now().Add(timeout-reserve))
+	defer transCancel()
 
 	res := SetModeResult{Device: dev.ID, RequestedMode: target}
 
@@ -313,12 +326,12 @@ func SetMode(ctx context.Context, sd *systemd.Client, dev *config.DeviceConfig, 
 				target, strings.Join(ModeNames(dev), ", "))
 		}
 		targetUnit = sc.Systemd
-		if sd.UnitStatus(ctx, targetUnit).Load == "not-found" {
+		if sd.UnitStatus(transCtx, targetUnit).Load == "not-found" {
 			return res, fmt.Errorf("mode %q is not installed: unit %s not found", target, targetUnit)
 		}
 	}
 
-	actual, desired := DeviceModes(ctx, sd, dev)
+	actual, desired := DeviceModes(transCtx, sd, dev)
 	if actual == target && desired == target {
 		res.Mode = target
 		return res, nil
@@ -332,44 +345,65 @@ func SetMode(ctx context.Context, sd *systemd.Client, dev *config.DeviceConfig, 
 		if name == target {
 			continue
 		}
-		if sd.UnitStatus(ctx, sc.Systemd).Load == "not-found" {
+		if sd.UnitStatus(transCtx, sc.Systemd).Load == "not-found" {
 			continue
 		}
-		if err := sd.DisableNow(ctx, sc.Systemd); err != nil {
+		if err := sd.DisableNow(transCtx, sc.Systemd); err != nil {
+			if transCtx.Err() != nil {
+				cancelPendingJobs(overall, sd, dev)
+			}
 			return res, fmt.Errorf("disable %s: %w", sc.Systemd, err)
 		}
 	}
 
 	if target != ModeIdle {
 		// Clear a possible StartLimit throttle from earlier failures.
-		_ = sd.ResetFailed(ctx, targetUnit)
-		if err := sd.EnableNow(ctx, targetUnit); err != nil {
+		_ = sd.ResetFailed(transCtx, targetUnit)
+		if err := sd.EnableNow(transCtx, targetUnit); err != nil {
+			if transCtx.Err() != nil {
+				cancelPendingJobs(overall, sd, dev)
+			}
 			return res, fmt.Errorf("enable %s: %w", targetUnit, err)
 		}
 	}
 	res.Changed = true
 
 	for {
-		actual, desired := DeviceModes(ctx, sd, dev)
+		actual, desired := DeviceModes(transCtx, sd, dev)
 		if actual == target && desired == target {
 			res.Mode = target
 			return res, nil
 		}
-		if target != ModeIdle && sd.UnitStatus(ctx, targetUnit).Active == "failed" {
+		if target != ModeIdle && sd.UnitStatus(transCtx, targetUnit).Active == "failed" {
 			return res, fmt.Errorf("unit %s failed to start; see: journalctl -u %s -n 50",
 				targetUnit, targetUnit)
 		}
 		select {
-		case <-ctx.Done():
-			// Report the state as seen at the deadline; the expired context
-			// cannot serve one more read, so take a short fresh one.
-			readCtx, readCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
-			cur, curDesired := DeviceModes(readCtx, sd, dev)
-			readCancel()
+		case <-transCtx.Done():
+			// Cleanup within the reserved slice of the SAME deadline:
+			// cancel whatever this transition may have left queued in
+			// PID 1, then take one diagnostic read for the error message.
+			cancelPendingJobs(overall, sd, dev)
+			cur, curDesired := DeviceModes(overall, sd, dev)
 			res.Mode = cur
 			return res, fmt.Errorf("timed out waiting for mode %q (current: %s, desired: %s)",
 				target, cur, curDesired)
 		case <-time.After(verifyPollInterval):
+		}
+	}
+}
+
+// cancelPendingJobs best-effort cancels queued systemd jobs of the device's
+// units, so a job enqueued before a deadline cannot land after the caller
+// has already reported failure and released its concurrency guard.
+func cancelPendingJobs(ctx context.Context, sd *systemd.Client, dev *config.DeviceConfig) {
+	jobs, err := sd.PendingJobs(ctx)
+	if err != nil {
+		return
+	}
+	for _, sc := range dev.Services {
+		if id, ok := jobs[sc.Systemd]; ok {
+			_ = sd.CancelJob(ctx, id)
 		}
 	}
 }

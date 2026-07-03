@@ -20,13 +20,24 @@ type Unit struct {
 	Enabled string
 }
 
+// pendingJob models a job enqueued in PID 1 that outlived its killed
+// systemctl client.
+type pendingJob struct {
+	id   int
+	unit string
+	verb string // enable | disable
+}
+
 type Fake struct {
 	mu            sync.Mutex
 	units         map[string]*Unit
 	calls         []string
 	errs          map[string]error
 	hang          map[string]bool
+	linger        map[string]bool
 	stickyEnabled map[string]bool
+	jobs          []pendingJob
+	nextJobID     int
 }
 
 func New(units map[string]*Unit) *Fake {
@@ -34,7 +45,9 @@ func New(units map[string]*Unit) *Fake {
 		units:         units,
 		errs:          map[string]error{},
 		hang:          map[string]bool{},
+		linger:        map[string]bool{},
 		stickyEnabled: map[string]bool{},
+		nextJobID:     1,
 	}
 }
 
@@ -55,6 +68,41 @@ func (f *Fake) HangVerb(verb string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.hang[verb] = true
+}
+
+// LingerJob makes a hung verb leave a pending job behind when its context
+// is cancelled — modelling systemd semantics where killing the systemctl
+// client does not remove the job it already enqueued in PID 1. The job is
+// visible via list-jobs, removable via cancel, and applies its effect when
+// CompleteJobs is called.
+func (f *Fake) LingerJob(verb string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.linger[verb] = true
+}
+
+// CompleteJobs lets every still-pending job land, mutating the unit table —
+// what PID 1 would eventually do unless the job was cancelled.
+func (f *Fake) CompleteJobs() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, j := range f.jobs {
+		u := f.units[j.unit]
+		if u == nil || u.Load == "not-found" {
+			continue
+		}
+		switch j.verb {
+		case "enable":
+			u.Enabled = "enabled"
+			u.Active = "active"
+		case "disable":
+			u.Active = "inactive"
+			if !f.stickyEnabled[j.unit] {
+				u.Enabled = "disabled"
+			}
+		}
+	}
+	f.jobs = nil
 }
 
 // StickyEnabled makes disable of the unit report success and stop it while
@@ -97,6 +145,12 @@ func (f *Fake) run(ctx context.Context, name string, args ...string) (string, er
 
 	if hang {
 		<-ctx.Done()
+		f.mu.Lock()
+		if f.linger[verb] && len(args) >= 3 {
+			f.jobs = append(f.jobs, pendingJob{id: f.nextJobID, unit: args[2], verb: verb})
+			f.nextJobID++
+		}
+		f.mu.Unlock()
 		return "", ctx.Err()
 	}
 	if verbErr != nil {
@@ -132,6 +186,22 @@ func (f *Fake) run(ctx context.Context, name string, args ...string) (string, er
 		}
 		return "", nil
 	case "reset-failed":
+		return "", nil
+	case "list-jobs":
+		var b strings.Builder
+		for _, j := range f.jobs {
+			fmt.Fprintf(&b, "%d %s start running\n", j.id, j.unit)
+		}
+		return b.String(), nil
+	case "cancel":
+		id := args[1]
+		kept := f.jobs[:0]
+		for _, j := range f.jobs {
+			if fmt.Sprint(j.id) != id {
+				kept = append(kept, j)
+			}
+		}
+		f.jobs = kept
 		return "", nil
 	}
 	return "", fmt.Errorf("unexpected systemctl %v", args)

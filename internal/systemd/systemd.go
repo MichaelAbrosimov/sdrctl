@@ -129,6 +129,29 @@ func (c *Client) ResetFailed(ctx context.Context, unit string) error {
 	return err
 }
 
+// PendingJobs returns systemd's queued/running jobs as unit → job id.
+// Killing a systemctl client does not remove a job it already enqueued in
+// PID 1; this is how such jobs are found for cancellation.
+func (c *Client) PendingJobs(ctx context.Context) (map[string]string, error) {
+	out, err := c.run(ctx, "systemctl", "list-jobs", "--no-pager", "--no-legend")
+	if err != nil {
+		return nil, err
+	}
+	jobs := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		if fields := strings.Fields(line); len(fields) >= 2 {
+			jobs[fields[1]] = fields[0]
+		}
+	}
+	return jobs, nil
+}
+
+// CancelJob cancels one queued systemd job by id.
+func (c *Client) CancelJob(ctx context.Context, id string) error {
+	_, err := c.run(ctx, "systemctl", "cancel", id)
+	return err
+}
+
 // Logs returns the last n journal lines of a unit.
 func (c *Client) Logs(ctx context.Context, unit string, n int) (string, error) {
 	return c.run(ctx, "journalctl", "-u", unit, "-n", strconv.Itoa(n), "--no-pager")

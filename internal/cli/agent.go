@@ -78,6 +78,10 @@ var agentCmd = &cobra.Command{
 			version.Version, cfg.Node.ID, cfg.Observer.IntervalSec)
 		obs.Run(ctx)
 		<-socketDone
+		// Drain in-flight transitions before exiting: they are deliberately
+		// not cancelled (systemd would complete their queued jobs anyway)
+		// and each is self-bounded by ModeSetTimeout.
+		srv.WaitTransitions()
 		log.Printf("sdrctl agent stopped")
 		return nil
 	},

@@ -52,10 +52,14 @@ func (o *Observer) Latest() core.Snapshot {
 }
 
 // Refresh rebuilds the snapshot and notifies listeners when it changed.
-// Reads use a background context: a snapshot in progress is cheap and may
-// finish even while the agent is shutting down.
+// The read is bounded so a hung systemctl cannot stall the observer loop or
+// a post-transition refresh (which runs on the write path of the API): on
+// timeout the affected fields degrade to "unknown", which after SDR-P1-01
+// will surface as non-ok health rather than a silent hang.
 func (o *Observer) Refresh() core.Snapshot {
-	cur := core.BuildSnapshot(context.Background(), o.cfg, o.sd)
+	ctx, cancel := context.WithTimeout(context.Background(), o.cfg.ModeSetTimeout())
+	defer cancel()
+	cur := core.BuildSnapshot(ctx, o.cfg, o.sd)
 
 	o.mu.Lock()
 	prev, had := o.last, o.haveLast

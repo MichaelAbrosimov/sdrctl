@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MichaelAbrosimov/sdrctl/internal/agent"
 	"github.com/MichaelAbrosimov/sdrctl/internal/config"
@@ -120,5 +121,32 @@ func TestSocketWriteReleasesInflightAfterTimeout(t *testing.T) {
 	srv.SocketHandler().ServeHTTP(rec, httptest.NewRequest("POST", "/mode/rtl-tcp", nil))
 	if rec.Code == http.StatusConflict {
 		t.Fatal("inflight guard was not released after the timed-out transition")
+	}
+}
+
+// SDR-P1-03 review item 1: the whole socket write path must be bounded —
+// including the very first status reads. A hung `systemctl show` used to
+// hold the handler in the idempotency preflight before claim/SetMode.
+func TestSocketWriteBoundedWhenShowHangs(t *testing.T) {
+	cfg := testConfig()
+	cfg.ModeSetTimeoutSec = 1
+	f := systemdtest.New(idleUnits())
+	f.HangVerb("show")
+	srv := newServer(cfg, f)
+
+	done := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		srv.SocketHandler().ServeHTTP(rec, httptest.NewRequest("POST", "/mode/rtl-tcp", nil))
+		done <- rec.Code
+	}()
+
+	select {
+	case code := <-done:
+		if code == http.StatusOK {
+			t.Errorf("write with hung systemctl reported success (%d)", code)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("socket write handler is not bounded: still blocked with a hung systemctl show")
 	}
 }
