@@ -36,8 +36,28 @@ func New(cfg *config.Config, sd *systemd.Client, obs *agent.Observer) *Server {
 	return &Server{cfg: cfg, sd: sd, obs: obs, inflight: map[string]bool{}}
 }
 
+// Handler returns the network API: read endpoints plus token-gated async
+// write endpoints (202 Accepted).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	s.readRoutes(mux)
+	mux.HandleFunc("POST /mode/{mode}", s.handleSetModeDefault)
+	mux.HandleFunc("POST /devices/{id}/mode/{mode}", s.handleSetModeDevice)
+	return mux
+}
+
+// SocketHandler returns the local-socket API: the same read endpoints plus
+// write endpoints that are always enabled and synchronous. Access control is
+// the socket file's ownership (root:<group> 0660), not a token.
+func (s *Server) SocketHandler() http.Handler {
+	mux := http.NewServeMux()
+	s.readRoutes(mux)
+	mux.HandleFunc("POST /mode/{mode}", s.handleSocketSetModeDefault)
+	mux.HandleFunc("POST /devices/{id}/mode/{mode}", s.handleSocketSetModeDevice)
+	return mux
+}
+
+func (s *Server) readRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /status", s.handleStatus)
 	mux.HandleFunc("GET /mode", s.handleMode)
@@ -45,9 +65,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /devices/{id}", s.handleDevice)
 	mux.HandleFunc("GET /devices/{id}/mode", s.handleDeviceMode)
 	mux.HandleFunc("GET /devices/{id}/health", s.handleDeviceHealth)
-	mux.HandleFunc("POST /mode/{mode}", s.handleSetModeDefault)
-	mux.HandleFunc("POST /devices/{id}/mode/{mode}", s.handleSetModeDevice)
-	return mux
 }
 
 // Run serves until the context is cancelled.
@@ -160,6 +177,54 @@ func (s *Server) handleSetModeDevice(w http.ResponseWriter, r *http.Request) {
 	s.setMode(w, r, r.PathValue("id"), r.PathValue("mode"))
 }
 
+func (s *Server) handleSocketSetModeDefault(w http.ResponseWriter, r *http.Request) {
+	dev, err := s.cfg.DefaultDevice()
+	if err != nil {
+		writeErr(w, http.StatusConflict, "%v", err)
+		return
+	}
+	s.setModeSync(w, dev.ID, r.PathValue("mode"))
+}
+
+func (s *Server) handleSocketSetModeDevice(w http.ResponseWriter, r *http.Request) {
+	s.setModeSync(w, r.PathValue("id"), r.PathValue("mode"))
+}
+
+// resolveTarget validates the device id and mode name, writing the error
+// response itself when validation fails.
+func (s *Server) resolveTarget(w http.ResponseWriter, id, mode string) *config.DeviceConfig {
+	dev, err := s.cfg.DeviceByID(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "%v", err)
+		return nil
+	}
+	if mode != core.ModeIdle {
+		if _, ok := dev.Services[mode]; !ok {
+			writeErr(w, http.StatusBadRequest, "unknown mode %q for device %s", mode, id)
+			return nil
+		}
+	}
+	return dev
+}
+
+// claim marks a device as having a mode change in flight.
+func (s *Server) claim(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inflight[id] {
+		return false
+	}
+	s.inflight[id] = true
+	return true
+}
+
+func (s *Server) release(id string) {
+	s.mu.Lock()
+	delete(s.inflight, id)
+	s.mu.Unlock()
+}
+
+// setMode is the network write path: token-gated, async 202 Accepted.
 func (s *Server) setMode(w http.ResponseWriter, r *http.Request, id, mode string) {
 	if !s.cfg.API.WriteEnabled {
 		writeErr(w, http.StatusForbidden, "write API is disabled (set api.write_enabled: true)")
@@ -176,16 +241,9 @@ func (s *Server) setMode(w http.ResponseWriter, r *http.Request, id, mode string
 		return
 	}
 
-	dev, err := s.cfg.DeviceByID(id)
-	if err != nil {
-		writeErr(w, http.StatusNotFound, "%v", err)
+	dev := s.resolveTarget(w, id, mode)
+	if dev == nil {
 		return
-	}
-	if mode != core.ModeIdle {
-		if _, ok := dev.Services[mode]; !ok {
-			writeErr(w, http.StatusBadRequest, "unknown mode %q for device %s", mode, id)
-			return
-		}
 	}
 
 	// Idempotency: requesting the current desired+actual mode is a no-op.
@@ -197,20 +255,14 @@ func (s *Server) setMode(w http.ResponseWriter, r *http.Request, id, mode string
 		return
 	}
 
-	s.mu.Lock()
-	if s.inflight[id] {
-		s.mu.Unlock()
+	if !s.claim(id) {
 		writeErr(w, http.StatusConflict, "mode change already in progress for device %s", id)
 		return
 	}
-	s.inflight[id] = true
-	s.mu.Unlock()
 
 	go func() {
 		defer func() {
-			s.mu.Lock()
-			delete(s.inflight, id)
-			s.mu.Unlock()
+			s.release(id)
 			// Publish the outcome (MQTT + fresh /status) right away.
 			s.obs.Refresh()
 		}()
@@ -226,4 +278,37 @@ func (s *Server) setMode(w http.ResponseWriter, r *http.Request, id, mode string
 		"device":         id,
 		"requested_mode": mode,
 	})
+}
+
+// setModeSync is the socket write path: trusted (file permissions instead of
+// a token) and synchronous — the CLI wants the final result, not a ticket.
+func (s *Server) setModeSync(w http.ResponseWriter, id, mode string) {
+	dev := s.resolveTarget(w, id, mode)
+	if dev == nil {
+		return
+	}
+
+	actual, desired := core.DeviceModes(s.sd, dev)
+	if actual == mode && desired == mode {
+		writeJSON(w, http.StatusOK, core.SetModeResult{
+			Device: id, RequestedMode: mode, Mode: mode, Changed: false,
+		})
+		return
+	}
+
+	if !s.claim(id) {
+		writeErr(w, http.StatusConflict, "mode change already in progress for device %s", id)
+		return
+	}
+	defer s.release(id)
+
+	res, err := core.SetMode(s.sd, dev, mode, setModeTimeout)
+	s.obs.Refresh()
+	if err != nil {
+		log.Printf("socket: mode set %s/%s failed: %v", id, mode, err)
+		writeErr(w, http.StatusInternalServerError, "%v", err)
+		return
+	}
+	log.Printf("socket: device %s switched to mode %s", id, mode)
+	writeJSON(w, http.StatusOK, res)
 }

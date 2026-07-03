@@ -21,6 +21,7 @@ var reservedModes = map[string]bool{"idle": true, "conflict": true, "unknown": t
 type Config struct {
 	Node     NodeConfig     `yaml:"node"`
 	API      APIConfig      `yaml:"api"`
+	Socket   SocketConfig   `yaml:"socket"`
 	MQTT     MQTTConfig     `yaml:"mqtt"`
 	Observer ObserverConfig `yaml:"observer"`
 
@@ -45,6 +46,14 @@ type APIConfig struct {
 	Listen       string `yaml:"listen"`
 	WriteEnabled bool   `yaml:"write_enabled"`
 	Token        string `yaml:"token"`
+}
+
+// SocketConfig describes the local control socket of the agent. The socket
+// is always served while the agent runs; access control is the socket file's
+// ownership (root:<group> 0660), not a token.
+type SocketConfig struct {
+	Path  string `yaml:"path"`
+	Group string `yaml:"group"`
 }
 
 type MQTTConfig struct {
@@ -117,9 +126,10 @@ func defaults() *Config {
 		host = "sdr-node"
 	}
 	return &Config{
-		Node: NodeConfig{ID: host, Role: "rtl-sdr-backend"},
-		API:  APIConfig{Enabled: true, Listen: "0.0.0.0:8081"},
-		MQTT: MQTTConfig{QoS: 1, Retain: true},
+		Node:   NodeConfig{ID: host, Role: "rtl-sdr-backend"},
+		API:    APIConfig{Enabled: true, Listen: "0.0.0.0:8081"},
+		Socket: SocketConfig{Path: "/run/sdrctl/sdrctl.sock", Group: "sdrctl"},
+		MQTT:   MQTTConfig{QoS: 1, Retain: true},
 		Observer: ObserverConfig{
 			IntervalSec: 5,
 			AutoRestore: true,
@@ -133,6 +143,12 @@ func (c *Config) normalize() {
 	}
 	if c.API.Listen == "" {
 		c.API.Listen = "0.0.0.0:8081"
+	}
+	if c.Socket.Path == "" {
+		c.Socket.Path = "/run/sdrctl/sdrctl.sock"
+	}
+	if c.Socket.Group == "" {
+		c.Socket.Group = "sdrctl"
 	}
 	if c.Observer.IntervalSec < 1 {
 		c.Observer.IntervalSec = 5

@@ -79,6 +79,29 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" \
   http://wyse-sdr-01:8081/devices/rtl-sdr-01/mode/rtl-tcp
 ```
 
+## Local control socket (v0.2)
+
+The agent also serves the API on a unix socket, `/run/sdrctl/sdrctl.sock`
+(`socket.path` / `socket.group` in config). This is the CLI's primary channel
+and differs from the network API in three ways:
+
+- **Always on** while the agent runs — independent of `api.enabled` /
+  `api.write_enabled`.
+- **No token.** Access control is the socket file: `root:sdrctl` `0660`;
+  being in the `sdrctl` group *is* the authorization.
+- **Writes are synchronous.** `POST /mode/{mode}` and
+  `POST /devices/{id}/mode/{mode}` block until the transition finishes and
+  return the final result (`200 {"device","requested_mode","mode","changed"}`,
+  `500` with the error message on failure). The CLI wants an answer, not a
+  ticket; async 202 remains the network contract for sdr-manager.
+
+Read endpoints are identical to the network API.
+
+```bash
+curl -s --unix-socket /run/sdrctl/sdrctl.sock http://localhost/status
+curl -s --unix-socket /run/sdrctl/sdrctl.sock -X POST http://localhost/mode/rtl-tcp
+```
+
 ## MQTT topics
 
 Publish-only telemetry (`mqtt.enabled: true`); prefix defaults to

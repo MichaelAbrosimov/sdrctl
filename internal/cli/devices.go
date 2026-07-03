@@ -24,12 +24,16 @@ var devicesCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		snap := core.BuildSnapshot(cfg, systemd.New())
+		snap, _ := agentSnapshot(cfg)
+		defaultID := ""
+		if d, err := cfg.DefaultDevice(); err == nil {
+			defaultID = d.ID
+		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 		fmt.Fprintln(w, "DEVICE\tTYPE\tLABEL\tSERIAL\tPRESENT\tMODE\tHEALTH\tDEFAULT")
-		for i, d := range snap.Devices {
+		for _, d := range snap.Devices {
 			def := ""
-			if cfg.Devices[i].Default {
+			if d.ID == defaultID {
 				def = "yes"
 			}
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
@@ -81,16 +85,15 @@ func deviceDispatch(cmd *cobra.Command, args []string) error {
 		rest = args[1:]
 	}
 
-	sd := systemd.New()
 	switch {
 	case len(rest) == 0, rest[0] == "status":
-		return printDeviceDetail(cfg, sd, dev)
+		return printDeviceDetail(cfg, dev)
 	case rest[0] == "logs":
-		return deviceLogs(sd, dev, logLines)
+		return deviceLogs(systemd.New(), dev, logLines)
 	case rest[0] == "mode" && len(rest) == 1:
-		return printMode(dev)
+		return printMode(cfg, dev)
 	case rest[0] == "mode" && len(rest) == 3 && rest[1] == "set":
-		return runModeSet(dev, rest[2])
+		return runModeSet(cfg, dev, rest[2])
 	default:
 		return fmt.Errorf("unknown device subcommand %q", strings.Join(rest, " "))
 	}
@@ -104,8 +107,8 @@ func deviceIDs(cfg *config.Config) []string {
 	return ids
 }
 
-func printDeviceDetail(cfg *config.Config, sd *systemd.Client, dev *config.DeviceConfig) error {
-	snap := core.BuildSnapshot(cfg, sd)
+func printDeviceDetail(cfg *config.Config, dev *config.DeviceConfig) error {
+	snap, _ := agentSnapshot(cfg)
 	var ds *core.DeviceStatus
 	for i := range snap.Devices {
 		if snap.Devices[i].ID == dev.ID {

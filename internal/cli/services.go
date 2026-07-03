@@ -25,7 +25,7 @@ var servicesCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		snap := core.BuildSnapshot(cfg, systemd.New())
+		snap, _ := agentSnapshot(cfg)
 		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 		fmt.Fprintln(w, "DEVICE\tMODE\tUNIT\tSTATUS\tENABLED\tPORT")
 		for _, d := range snap.Devices {

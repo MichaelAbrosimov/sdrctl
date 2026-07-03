@@ -2,19 +2,15 @@ package cli
 
 import (
 	"fmt"
-	"net"
-	"net/http"
 	"os"
 	"sort"
 	"strings"
 	"text/tabwriter"
-	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/MichaelAbrosimov/sdrctl/internal/config"
 	"github.com/MichaelAbrosimov/sdrctl/internal/core"
-	"github.com/MichaelAbrosimov/sdrctl/internal/systemd"
 )
 
 var statusCmd = &cobra.Command{
@@ -26,15 +22,15 @@ var statusCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		snap := core.BuildSnapshot(cfg, systemd.New())
-		printStatus(cfg, snap)
+		snap, viaAgent := agentSnapshot(cfg)
+		printStatus(cfg, snap, viaAgent)
 		return nil
 	},
 }
 
 func init() { rootCmd.AddCommand(statusCmd) }
 
-func printStatus(cfg *config.Config, snap core.Snapshot) {
+func printStatus(cfg *config.Config, snap core.Snapshot, viaAgent bool) {
 	role := ""
 	if snap.Role != "" {
 		role = " (" + snap.Role + ")"
@@ -49,6 +45,7 @@ func printStatus(cfg *config.Config, snap core.Snapshot) {
 	if snap.LANIP != "" {
 		fmt.Printf("LAN IP:   %s\n", snap.LANIP)
 	}
+	fmt.Printf("Agent:    %s\n", agentLine(cfg, viaAgent))
 	fmt.Printf("API:      %s\n", apiLine(cfg))
 	fmt.Printf("MQTT:     %s\n", mqttLine(cfg))
 	fmt.Printf("Health:   %s (ok=%v)\n", snap.Health, snap.OK)
@@ -62,15 +59,22 @@ func printStatus(cfg *config.Config, snap core.Snapshot) {
 	}
 }
 
+func agentLine(cfg *config.Config, viaAgent bool) string {
+	if viaAgent {
+		return "running — " + cfg.Socket.Path
+	}
+	return "unreachable (" + cfg.Socket.Path + ") — state read directly from systemd"
+}
+
 func apiLine(cfg *config.Config) string {
 	if !cfg.API.Enabled {
 		return "disabled"
 	}
 	url := "http://" + cfg.API.Listen
-	if agentResponds(cfg) {
-		return url + " — agent running"
+	if cfg.API.WriteEnabled {
+		return url + " (read/write)"
 	}
-	return url + " — agent not responding"
+	return url + " (read-only)"
 }
 
 func mqttLine(cfg *config.Config) string {
@@ -78,20 +82,6 @@ func mqttLine(cfg *config.Config) string {
 		return "disabled"
 	}
 	return cfg.MQTT.Broker + " (publish-only, prefix " + cfg.MQTT.TopicPrefix + ")"
-}
-
-func agentResponds(cfg *config.Config) bool {
-	_, port, err := net.SplitHostPort(cfg.API.Listen)
-	if err != nil {
-		return false
-	}
-	client := http.Client{Timeout: 500 * time.Millisecond}
-	resp, err := client.Get("http://127.0.0.1:" + port + "/health")
-	if err != nil {
-		return false
-	}
-	resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
 }
 
 func printDevicesTable(snap core.Snapshot) {

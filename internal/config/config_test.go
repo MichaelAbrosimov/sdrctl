@@ -106,4 +106,7 @@ func TestMissingFileUsesDefaults(t *testing.T) {
 	if cfg.MQTT.TopicPrefix == "" || cfg.MQTT.ClientID == "" {
 		t.Errorf("mqtt defaults not derived: %+v", cfg.MQTT)
 	}
+	if cfg.Socket.Path != "/run/sdrctl/sdrctl.sock" || cfg.Socket.Group != "sdrctl" {
+		t.Errorf("socket defaults not applied: %+v", cfg.Socket)
+	}
 }

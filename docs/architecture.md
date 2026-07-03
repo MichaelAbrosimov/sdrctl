@@ -123,16 +123,29 @@ Findings from the first deployment (systemd 257 / polkitd 126):
 - A `sudoers` whitelist of `systemctl ... rtl-*` was rejected: sudoers
   wildcards match spaces, so such a pattern also permits extra arguments.
 
-Agreed direction for v0.2 (2026-07-03) — socket-first CLI, docker/tailscale
-style: the agent additionally listens on a unix socket
-(`/run/sdrctl/sdrctl.sock`, `root:sdrctl` 0660 — file permissions instead of
-a token) where read AND write endpoints are always available, independent of
-the network API. `sdrctl mode set` prefers the socket (agent becomes the
-single executor of transitions); when the agent is down the CLI falls back to
-driving systemctl directly with a warning — the node must stay controllable
-during recovery. The polkit rule therefore stays permanently as the fallback
-path's privilege mechanism. The network write API (token) remains the
-integration path for external callers such as sdr-manager.
+## Socket-first CLI (v0.2, implemented)
+
+Since v0.2 the agent is the core and the CLI is its client, docker/tailscale
+style. The agent listens on a unix socket (`/run/sdrctl/sdrctl.sock`,
+`root:sdrctl` 0660 — file permissions instead of a token) where read AND
+write endpoints are always available, independent of the network API
+(`internal/api/socket.go`; `RuntimeDirectory=sdrctl` in the agent unit
+provides `/run/sdrctl`).
+
+- **Writes**: `sdrctl mode set` goes through the socket — the agent is the
+  single executor of transitions, so CLI and API changes share one inflight
+  guard and one synchronous code path (the socket returns the final result,
+  unlike the async-202 network API). When the agent is unreachable the CLI
+  falls back to driving systemctl directly with a warning — the node must
+  stay controllable during recovery. An *error reply* from a running agent
+  never triggers fallback: the agent is the authority.
+- **Reads**: `status`, `devices`, `services`, `mode`, `device` prefer the
+  agent's snapshot (identical to what the network API and MQTT publish) and
+  fall back silently to deriving it locally — reads need no privileges.
+- The polkit rule stays permanently as the fallback path's privilege
+  mechanism; the operator additionally joins the `sdrctl` group for the
+  socket. The network write API (token) remains the integration path for
+  external callers such as sdr-manager.
 
 ## Multi-client rtl_tcp (future, separate project)
 

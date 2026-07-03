@@ -17,6 +17,14 @@ api:
   write_enabled: false
   token: ""
 
+# Local control socket — the CLI's primary channel. Always served while the
+# agent runs; read AND write, no token: access control is the socket file
+# (root:<group> 0660). Create the group once on the node:
+#   groupadd sdrctl && usermod -aG sdrctl <operator>
+socket:
+  path: /run/sdrctl/sdrctl.sock
+  group: sdrctl
+
 mqtt:
   enabled: false
   broker: "tcp://192.168.0.10:1883"

@@ -10,6 +10,10 @@ Type=simple
 ExecStart=/usr/local/bin/sdrctl agent --config /etc/sdrctl/config.yaml
 Restart=on-failure
 RestartSec=3
+# /run/sdrctl for the local control socket (root:sdrctl 0660). Operators must
+# be in the sdrctl group: groupadd sdrctl && usermod -aG sdrctl <user>
+RuntimeDirectory=sdrctl
+RuntimeDirectoryMode=0755
 # root is acceptable in v0.1: the agent drives systemctl. A tighter setup via
 # polkit rules for org.freedesktop.systemd1 is documented in docs/architecture.md.
 User=root

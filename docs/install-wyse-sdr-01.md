@@ -40,6 +40,7 @@ mkdir -p /etc/sdrctl
 cp configs/config.example.yaml /etc/sdrctl/config.yaml    # edit node id etc.
 cp systemd/rtl-tcp.service /etc/systemd/system/           # single-device form
 cp systemd/sdrctl-agent.service /etc/systemd/system/
+groupadd -f sdrctl                                        # control socket group
 systemctl daemon-reload
 systemctl enable --now sdrctl-agent
 ```
@@ -47,20 +48,28 @@ systemctl enable --now sdrctl-agent
 `rtl-433.service` / `spyserver.service` are optional; while absent they show
 as `not-installed` and break nothing.
 
-## 4. No-sudo CLI for the operator user (optional)
+## 4. No-sudo CLI for the operator user
 
-To let the operator user run every sdrctl command (including `mode set`)
-without sudo:
+Primary path (v0.2): the CLI talks to the agent over
+`/run/sdrctl/sdrctl.sock`; membership in the `sdrctl` group is the whole
+authorization:
+
+```bash
+usermod -aG sdrctl <user>                          # control socket; re-login
+usermod -aG systemd-journal <user>                 # for sdrctl logs; re-login
+```
+
+Fallback path (agent down — `mode set` then drives systemctl directly and
+needs polkit):
 
 ```bash
 apt install -y polkitd
 cp polkit/50-sdrctl.rules /etc/polkit-1/rules.d/   # adjust the user name inside
 systemctl restart polkit
-usermod -aG systemd-journal <user>                 # for sdrctl logs; re-login
 ```
 
-See "Root and privileges" in docs/architecture.md for what exactly the rule
-grants and why enable/disable cannot be scoped per unit.
+See "Root and privileges" and "Socket-first CLI" in docs/architecture.md for
+what exactly the rule grants and why enable/disable cannot be scoped per unit.
 
 ## 5. Acceptance check
 
@@ -76,7 +85,12 @@ sdrctl device
 curl http://127.0.0.1:8081/health
 curl http://127.0.0.1:8081/status
 curl http://127.0.0.1:8081/mode
+curl --unix-socket /run/sdrctl/sdrctl.sock http://localhost/health
 ```
+
+`sdrctl status` must show `Agent: running — /run/sdrctl/sdrctl.sock`. If it
+says `unreachable`, the CLI still works but drives systemd directly
+(check group membership and that sdrctl-agent is active).
 
 Reboot test: set a mode, reboot — the mode must come back by itself (desired
 state = enabled units; sdrctl needs no init/restore step).

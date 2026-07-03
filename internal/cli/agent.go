@@ -46,8 +46,24 @@ var agentCmd = &cobra.Command{
 			}
 		}
 
+		srv := api.New(cfg, sd, obs)
+
+		// The local socket is the primary control channel: always on while
+		// the agent runs, independent of the network API below. socketDone
+		// lets shutdown wait for the socket file to be removed.
+		socketDone := make(chan struct{})
+		go func() {
+			defer close(socketDone)
+			log.Printf("socket: listening on %s (group %s, read/write)",
+				cfg.Socket.Path, cfg.Socket.Group)
+			if err := srv.RunSocket(ctx, cfg.Socket.Path, cfg.Socket.Group); err != nil &&
+				!errors.Is(err, http.ErrServerClosed) {
+				log.Printf("socket: %v", err)
+				stop()
+			}
+		}()
+
 		if cfg.API.Enabled {
-			srv := api.New(cfg, sd, obs)
 			go func() {
 				log.Printf("api: listening on %s (write_enabled=%v)",
 					cfg.API.Listen, cfg.API.WriteEnabled)
@@ -61,6 +77,7 @@ var agentCmd = &cobra.Command{
 		log.Printf("sdrctl agent %s started (node %s, observer every %ds)",
 			version.Version, cfg.Node.ID, cfg.Observer.IntervalSec)
 		obs.Run(ctx)
+		<-socketDone
 		log.Printf("sdrctl agent stopped")
 		return nil
 	},
