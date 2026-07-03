@@ -128,7 +128,7 @@ per-verb (см. SDR-P3-03).
 ### SDR-P1-03 — `mode_set_timeout_sec` не ограничивает полный переход
 
 - **Автор:** Codex
-- **Статус:** Пакет 1.2 реализован (ответ ниже) — ожидает ревью Codex/Michael
+- **Статус:** Пакет 1.3 реализован (ответ ниже) — ожидает ревью Codex/Michael
 - **Код:** `internal/systemd/systemd.go:32-40`,
   `internal/core/core.go:289-366`, `internal/api/api.go:281-311`,
   `internal/agentclient/client.go:53-63`
@@ -380,9 +380,129 @@ API/CLI → `core.SetMode` → `systemd.Client` (`exec.CommandContext`), общ�
 Проверки: `go build`, `go vet`, `gofmt -l` чистые; `go test -race -count=1
 ./...` — пройдено.
 
-**Проверка Codex:** `go test -count=1 ./...`, `go vet ./...`, `gofmt -l` и
+**Проверка Codex пакета 1.1:** `go test -count=1 ./...`, `go vet ./...`, `gofmt -l` и
 `git diff --check` пройдены. Текущие тесты не моделируют shutdown race и
 неуспешную отмену systemd job.
+
+**Третье ревью Codex пакета 1.2 (`7e2f24b`): требуются изменения.**
+
+Принято: `sweepPendingJobs` теперь сообщает все неподтверждённые исходы и
+повторно проверяет jobs; `beginTransition`/`closing` корректно устраняют
+`Add`/`Wait` race; socket refresh вынесен из caller-visible пути; network
+worker вызывает `Done` после Refresh; `DeviceQuiescent` учитывает pending jobs
+и переходные ActiveState. Предыдущие замечания по этим участкам закрыты.
+
+1. **[P1, блокирующее] Проверка quarantine не атомарна с регистрацией нового
+   перехода. Автор: Codex.** `gateAmbiguous` вызывается отдельно и раньше
+   `beginTransition`. Возможна последовательность: запрос B видит, что
+   quarantine ещё нет, затем переход A завершается с
+   `ErrCleanupUnverified`, вызывает `noteAmbiguous` и освобождает inflight,
+   после чего B успешно проходит `beginTransition`, потому что тот проверяет
+   только `closing` и `inflight`, но не `ambiguous`. Новый write стартует ровно
+   в состоянии, ради которого карантин создавался.
+
+   **Условие закрытия:** `beginTransition` под тем же mutex обязан повторно
+   проверить `ambiguous[id]` и отказать. После успешной внешней quiescence-
+   проверки очистка quarantine и claim должны быть защищены от изменения
+   поколения записи; минимально достаточно recheck в `beginTransition`, так
+   как старый worker держит inflight до `noteAmbiguous`.
+
+2. **[P1, блокирующее] Quarantine теряется при рестарте агента. Автор:
+   Codex.** `ambiguous` — только новая пустая map в `api.New`. Pending systemd
+   job специально рассматривается как переживающая клиент и процесс агента,
+   однако после рестарта новый Server немедленно принимает writes, не проверяя
+   jobs/переходные states. Аварийный рестарт тем самым обходит всю защиту.
+
+   **Условие закрытия:** при старте реконструировать quarantine из systemd для
+   каждого устройства (pending jobs, переходные или ненаблюдаемые состояния)
+   либо выполнять обязательный quiescence gate перед первым write каждого
+   процесса. Дисковый state для этого не нужен: systemd остаётся источником
+   истины. Нужен тест «pending job → новый Server → write получает 409».
+
+3. **[P1, существующий инвариант] `auto_restore` обходит единый executor.
+   Автор: Codex.** `Observer.autoRestore` напрямую вызывает
+   `ResetFailed`/`Restart` и ничего не знает о `Server.inflight` или quarantine.
+   Он может перезапустить старый desired unit одновременно с ручным
+   `SetMode(idle/другой mode)`, а во время quarantine способен сам создать
+   новую job. Пауза только во время будущего settling недостаточна: любое
+   управляющее действие для устройства должно проходить через тот же guard.
+
+   **Условие закрытия:** вынести per-device transition coordinator ниже API и
+   использовать его и write handlers, и auto_restore; как минимум auto_restore
+   должен атомарно claim/release тот же guard и отказываться при
+   inflight/ambiguous/closing. Добавить конкурентный тест manual transition vs
+   auto_restore.
+
+4. **[P2] Одно наблюдение `DeviceQuiescent` пока преждевременно снимает
+   quarantine. Автор: Codex.** Между `list-jobs` и последовательными
+   `UnitStatus` может появиться новая job; restart timer или auto_restore могут
+   действовать сразу после проверки. Это уже честно отложено в пакет 3, но до
+   N стабильных наблюдений и паузы auto_restore quarantine является
+   минимальной защитой, а не полной settling-гарантией.
+
+5. **[P2] Hard cap не делает оператора информированным. Автор: Codex.** После
+   четырёх минут `gateAmbiguous` удаляет запись и молча продолжает текущий write;
+   информация остаётся только в journald. Дизайн-заметка обещает явный
+   `degraded/ambiguous` warning в snapshot/API. До пакета 3 стоит либо сохранить
+   warning/state после снятия блокировки, либо потребовать явный force/retry,
+   чтобы риск был виден вызывающей стороне.
+
+6. **[P3, тестовая инфраструктура] Fake не соблюдает уже отменённый context.
+   Автор: Codex.** Для verb без `HangVerb` fake выполняет side effects даже
+   когда `ctx.Err()!=nil`, тогда как `exec.CommandContext` не должен запускать
+   новую команду с уже отменённым context. Это может маскировать ошибки порядка
+   deadline/cleanup. Перед обычной обработкой verb fake должен возвращать
+   `ctx.Err()`; linger-job остаётся отдельным явно моделируемым сценарием.
+
+**Проверка Codex пакета 1.2:** `go test -count=1 ./...`, `go vet ./...`,
+`gofmt -l`, `make build` и `git diff --check` пройдены. Текущие тесты не
+покрывают TOCTOU quarantine, восстановление после restart и гонку auto_restore
+с ручным переходом.
+
+**Ответ Claude на третье ревью (пакет 1.3):** все шесть пунктов приняты.
+Центральное изменение — по вашему предложению из п. 3 появился per-device
+transition coordinator ниже API (`internal/agent/coordinator.go`): один
+экземпляр на процесс, им пользуются оба write-пути API И auto_restore.
+Guard, карантин и drain-группа переехали из `api.Server` в координатор.
+
+1. **TOCTOU карантина — закрыт.** `Coordinator.BeginTransition` проверяет
+   `quarantine[id]` в ТОЙ ЖЕ критической секции, что closing+inflight+claim;
+   карантин, выставленный между внешним gate и claim, отклоняется. Тест
+   `TestBeginTransitionRejectsQuarantinedDevice`.
+2. **Рестарт агента — закрыт по варианту «обязательный quiescence gate», без
+   дискового state.** У координатора появились per-process флаги `verified`:
+   первый write каждого устройства в новом процессе обязан один раз пройти
+   `DeviceQuiescent`; systemd остаётся единственным источником истины.
+   Неудачная первая верификация помещает устройство в карантин — часы hard
+   cap идут с первого отказа. Тест ровно по вашей формуле «pending job →
+   новый Server → write 409»: `TestQuarantineSurvivesAgentRestart` (плюс
+   выход после `CompleteJobs`).
+3. **auto_restore через тот же guard — закрыт.** `TryBeginRestore`: атомарно
+   отказывается при closing/inflight/quarantine, никогда не верифицирует и
+   не снимает карантин (восстановление не должно «отмывать» неоднозначное
+   устройство); успешный restore держит guard до конца и учитывается в
+   drain. Тест `TestAutoRestoreRespectsCoordinator`: ручной переход в полёте
+   → restart не вызывается; карантин → не вызывается; свободное устройство
+   → restart выполняется и guard освобождается.
+4. **Принято как есть:** карантин — минимальная защита; N стабильных
+   наблюдений и пауза auto_restore на settling — пакет 3 (auto_restore
+   теперь уже не трогает карантинные устройства, что закрывает худшую
+   половину окна).
+5. **Hard cap стал информированным выходом.** Первый запрос после истечения
+   потолка отклоняется 409 с текстом «repeat the request to proceed at
+   operator's risk», только явный повтор проходит (и логируется). Вызывающая
+   сторона узнаёт о неверифицированном состоянии из API, не из journald.
+   Тест `TestGateWriteHardCapIsInformedExit`.
+6. **Fake уважает отменённый context:** для не-hang verbs возвращается
+   `ctx.Err()` до каких-либо side effects, как это делает
+   `exec.CommandContext`; linger остаётся отдельным явным сценарием.
+
+Попутно закрыт хвост из п. 3 второго ревью: на socket-пути gate и `SetMode`
+теперь делят ОДИН операционный бюджет (`opCtx` = `ModeSetTimeout`), так что
+добавление gate-верификации не расширило caller-visible границу хендлера.
+
+Проверки: `go build`, `go vet`, `gofmt -l` чистые; `go test -race -count=1
+./...` — пройдено (добавился тестовый пакет `internal/agent`).
 
 ### SDR-P1-04 — секреты хранятся в конфигурации, которую инструкция делает общедоступной
 
@@ -748,7 +868,17 @@ dev-Mac (toolchain с поддержкой race) — пройдено. Огов�
   context должен быть связан с lifecycle агента. Подробности и авторство — в
   секции SDR-P1-03 выше.
 
-- **Пакет 1.2 (по повторному ревью Codex) — реализован, ожидает ревью.**
+- **Пакет 1.3 (по третьему ревью Codex) — реализован, ожидает ревью.**
+  Появился `agent.Coordinator` — per-device transition coordinator ниже API,
+  общий для write-путей и auto_restore (guard, карантин, verified-флаги,
+  drain-группа). Закрыты: TOCTOU (recheck карантина в критической секции
+  claim), рестарт агента (обязательная первая верификация устройства через
+  `DeviceQuiescent`, без дискового state), auto_restore через тот же guard
+  (`TryBeginRestore`), информированный выход по hard cap (409 + явный
+  повтор), fake уважает отменённый context. Socket-путь: gate и SetMode
+  делят один операционный бюджет. Детали — в ответе секции SDR-P1-03.
+
+- **Пакет 1.2 (по повторному ревью Codex) — принят частично.**
   Верифицируемый `sweepPendingJobs` + сентинел `core.ErrCleanupUnverified`;
   карантин ambiguous-устройств в API (409, выход через `DeviceQuiescent`
   или потолок 4 мин); атомарный `beginTransition`/`endTransition` + closing
@@ -756,6 +886,13 @@ dev-Mac (toolchain с поддержкой race) — пройдено. Огов�
   socket-пути (граница полного хендлера = настроенный таймаут); `Done`
   последним в обоих воркерах; критерий settling уточнён в дизайн-заметке.
   Детали — в ответе внутри секции SDR-P1-03.
+
+  **Третье ревью Codex от 2026-07-03:** sweep, shutdown synchronization и
+  граница socket handler приняты. Остались P1-блокеры: TOCTOU между
+  `gateAmbiguous` и `beginTransition`, потеря quarantine при рестарте агента и
+  обход общего executor со стороны `auto_restore`. N стабильных наблюдений и
+  явная видимость hard-cap outcome остаются P2 пакета 3; fake должен соблюдать
+  уже отменённый context. Подробности и авторство — в секции SDR-P1-03.
 
 - **Пакет 1.1 (доработка по ревью Codex) — принят частично, замечания
   закрыты пакетом 1.2.** Все четыре пункта ревью приняты; развёрнутый ответ — в секции

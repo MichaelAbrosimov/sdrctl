@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/MichaelAbrosimov/sdrctl/internal/agent"
@@ -32,49 +31,28 @@ const preflightTimeout = 5 * time.Second
 // Rationale (see the settling design note in CODE_REVIEW.md): everything
 // systemd does on its own settles within StartLimitIntervalSec-scale time;
 // past 2× that, keeping the operator locked out is worse than letting an
-// informed retry through.
+// informed retry through (the coordinator makes that exit loud).
 const ambiguousHardCap = 4 * time.Minute
 
 type Server struct {
-	cfg *config.Config
-	sd  *systemd.Client
-	obs *agent.Observer
-
-	mu       sync.Mutex
-	inflight map[string]bool
-	closing  bool
-	// ambiguous quarantines devices whose failed transition could not be
-	// verified as cleaned up (core.ErrCleanupUnverified): a pending systemd
-	// job may still land. Writes are refused until the device is verified
-	// quiescent or the hard cap expires. Value = quarantine entry time.
-	ambiguous map[string]time.Time
-	// wg tracks in-flight transitions (including their post-transition
-	// snapshot refresh) so agent shutdown can drain them; each part is
-	// bounded, so the wait is finite.
-	wg sync.WaitGroup
+	cfg   *config.Config
+	sd    *systemd.Client
+	obs   *agent.Observer
+	coord *agent.Coordinator
 }
 
-func New(cfg *config.Config, sd *systemd.Client, obs *agent.Observer) *Server {
-	return &Server{
-		cfg: cfg, sd: sd, obs: obs,
-		inflight:  map[string]bool{},
-		ambiguous: map[string]time.Time{},
-	}
+// New wires the server to the agent-wide transition coordinator: the same
+// guard serves API writes and the observer's auto-restore, which is what
+// makes "single executor per device" hold process-wide.
+func New(cfg *config.Config, sd *systemd.Client, obs *agent.Observer, coord *agent.Coordinator) *Server {
+	return &Server{cfg: cfg, sd: sd, obs: obs, coord: coord}
 }
 
-// WaitTransitions blocks until every in-flight transition (and its
-// snapshot refresh) finishes, refusing new ones first. Called on agent
-// shutdown: started transitions are deliberately not cancelled (systemd
-// would complete their jobs anyway), and each is self-bounded, so this
-// returns within that bound. Setting closing under the same mutex that
-// beginTransition uses removes the Add-vs-Wait race: any transition either
-// registered before this point or is rejected.
-func (s *Server) WaitTransitions() {
-	s.mu.Lock()
-	s.closing = true
-	s.mu.Unlock()
-	s.wg.Wait()
-}
+// WaitTransitions refuses new transitions, then blocks until every
+// in-flight one (including tracked refreshes and auto-restores) finishes.
+// Started transitions are deliberately not cancelled — systemd would
+// complete their jobs anyway — and each is self-bounded.
+func (s *Server) WaitTransitions() { s.coord.Wait() }
 
 // Handler returns the network API: read endpoints plus token-gated async
 // write endpoints (202 Accepted).
@@ -247,32 +225,20 @@ func (s *Server) resolveTarget(w http.ResponseWriter, id, mode string) *config.D
 	return dev
 }
 
-// beginTransition atomically checks the shutdown flag and the inflight
-// guard, then registers the transition in the drain group — one critical
-// section, so WaitTransitions can never miss a started transition. The
-// returned status code is 0 on success.
+// beginTransition maps the coordinator's verdict to an HTTP status; the
+// returned code is 0 on success. The coordinator re-checks the quarantine
+// inside the same critical section as the claim, so a device quarantined
+// between gateWrite and here is still refused.
 func (s *Server) beginTransition(id string) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closing {
-		return http.StatusServiceUnavailable, fmt.Errorf("agent is shutting down")
+	err := s.coord.BeginTransition(id)
+	switch {
+	case err == nil:
+		return 0, nil
+	case errors.Is(err, agent.ErrShuttingDown):
+		return http.StatusServiceUnavailable, err
+	default:
+		return http.StatusConflict, err
 	}
-	if s.inflight[id] {
-		return http.StatusConflict, fmt.Errorf("mode change already in progress for device %s", id)
-	}
-	s.inflight[id] = true
-	s.wg.Add(1)
-	return 0, nil
-}
-
-// endTransition is the LAST thing a transition worker does — after the
-// transition itself and its snapshot refresh — so WaitTransitions covers
-// the whole lifecycle.
-func (s *Server) endTransition(id string) {
-	s.mu.Lock()
-	delete(s.inflight, id)
-	s.mu.Unlock()
-	s.wg.Done()
 }
 
 // noteAmbiguous quarantines the device when a failed transition's cleanup
@@ -281,72 +247,22 @@ func (s *Server) noteAmbiguous(id string, err error) {
 	if !errors.Is(err, core.ErrCleanupUnverified) {
 		return
 	}
-	s.mu.Lock()
-	if _, ok := s.ambiguous[id]; !ok {
-		s.ambiguous[id] = time.Now()
-	}
-	s.mu.Unlock()
+	s.coord.Quarantine(id)
 	log.Printf("api: device %s quarantined (unverified cleanup): %v", id, err)
 }
 
-// gateAmbiguous refuses writes for a quarantined device until it is
-// verified quiescent (no pending jobs, no transitional unit states) or the
-// hard cap expires. Verification runs on demand right here — no background
-// loop can race the write path this way.
-func (s *Server) gateAmbiguous(dev *config.DeviceConfig) error {
-	s.mu.Lock()
-	since, quarantined := s.ambiguous[dev.ID]
-	s.mu.Unlock()
-	if !quarantined {
-		return nil
-	}
-
-	if time.Since(since) > ambiguousHardCap {
-		log.Printf("api: device %s leaves quarantine by hard cap (%s) without verification — proceeding on operator responsibility",
-			dev.ID, ambiguousHardCap)
-		s.clearAmbiguous(dev.ID)
-		return nil
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), preflightTimeout)
-	quiet, err := core.DeviceQuiescent(ctx, s.sd, dev)
-	cancel()
-	if err == nil && quiet {
-		log.Printf("api: device %s verified quiescent, quarantine lifted", dev.ID)
-		s.clearAmbiguous(dev.ID)
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("device %s is quarantined after an unverified cleanup and still cannot be verified (%v); retry later or wait out the cap (%s left)",
-			dev.ID, err, (ambiguousHardCap - time.Since(since)).Round(time.Second))
-	}
-	return fmt.Errorf("device %s is quarantined: pending systemd activity from a failed transition has not settled yet (%s until hard cap)",
-		dev.ID, (ambiguousHardCap - time.Since(since)).Round(time.Second))
-}
-
-func (s *Server) clearAmbiguous(id string) {
-	s.mu.Lock()
-	delete(s.ambiguous, id)
-	s.mu.Unlock()
+// gateWrite runs the coordinator's write gate (verified / first-write
+// verification / quarantine) within the given parent context.
+func (s *Server) gateWrite(ctx context.Context, dev *config.DeviceConfig) error {
+	gateCtx, cancel := context.WithTimeout(ctx, preflightTimeout)
+	defer cancel()
+	return s.coord.GateWrite(gateCtx, s.sd, dev, ambiguousHardCap)
 }
 
 // refreshAsync publishes a fresh snapshot without holding the caller: the
 // socket response must not pay for a second ModeSetTimeout-bounded read
-// pass. The refresh is registered in the drain group unless shutdown has
-// already begun (then the final state is systemd's to keep).
-func (s *Server) refreshAsync() {
-	s.mu.Lock()
-	if s.closing {
-		s.mu.Unlock()
-		return
-	}
-	s.wg.Add(1)
-	s.mu.Unlock()
-	go func() {
-		defer s.wg.Done()
-		s.obs.Refresh()
-	}()
-}
+// pass. The refresh joins the drain group unless shutdown already began.
+func (s *Server) refreshAsync() { s.coord.Go(func() { s.obs.Refresh() }) }
 
 // setMode is the network write path: token-gated, async 202 Accepted.
 func (s *Server) setMode(w http.ResponseWriter, r *http.Request, id, mode string) {
@@ -370,7 +286,7 @@ func (s *Server) setMode(w http.ResponseWriter, r *http.Request, id, mode string
 		return
 	}
 
-	if err := s.gateAmbiguous(dev); err != nil {
+	if err := s.gateWrite(r.Context(), dev); err != nil {
 		writeErr(w, http.StatusConflict, "%v", err)
 		return
 	}
@@ -394,9 +310,9 @@ func (s *Server) setMode(w http.ResponseWriter, r *http.Request, id, mode string
 	}
 
 	go func() {
-		// endTransition runs after the refresh below: the drain group
+		// EndTransition runs after the refresh below: the drain group
 		// covers the worker's whole lifecycle, not just SetMode.
-		defer s.endTransition(id)
+		defer s.coord.EndTransition(id)
 		// Deliberately not the request context: an accepted transition must
 		// finish even if the caller disconnects; SetMode bounds itself.
 		if _, err := core.SetMode(context.Background(), s.sd, dev, mode, s.cfg.ModeSetTimeout()); err != nil {
@@ -424,7 +340,15 @@ func (s *Server) setModeSync(w http.ResponseWriter, id, mode string) {
 		return
 	}
 
-	if err := s.gateAmbiguous(dev); err != nil {
+	// One operation budget for the WHOLE synchronous path: the write gate
+	// and the transition share it, so the caller-visible bound stays the
+	// configured timeout even when the gate itself has to read systemd.
+	// Deliberately not the request context: a started transition must run
+	// to completion if the CLI disconnects — the client timeout is longer.
+	opCtx, opCancel := context.WithTimeout(context.Background(), s.cfg.ModeSetTimeout())
+	defer opCancel()
+
+	if err := s.gateWrite(opCtx, dev); err != nil {
 		writeErr(w, http.StatusConflict, "%v", err)
 		return
 	}
@@ -436,12 +360,9 @@ func (s *Server) setModeSync(w http.ResponseWriter, id, mode string) {
 		writeErr(w, code, "%v", err)
 		return
 	}
-	defer s.endTransition(id)
+	defer s.coord.EndTransition(id)
 
-	// Not the request context: even on the synchronous socket path a started
-	// transition must run to completion if the CLI disconnects — the client
-	// timeout is longer than SetMode's own deadline, which bounds this call.
-	res, err := core.SetMode(context.Background(), s.sd, dev, mode, s.cfg.ModeSetTimeout())
+	res, err := core.SetMode(opCtx, s.sd, dev, mode, s.cfg.ModeSetTimeout())
 	// Asynchronous on purpose: a second synchronous ModeSetTimeout-bounded
 	// read pass would let the full handler take ~2× the configured timeout,
 	// past what the socket client waits.

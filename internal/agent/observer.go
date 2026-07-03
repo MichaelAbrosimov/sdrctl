@@ -19,8 +19,9 @@ import (
 )
 
 type Observer struct {
-	cfg *config.Config
-	sd  *systemd.Client
+	cfg   *config.Config
+	sd    *systemd.Client
+	coord *Coordinator
 
 	mu       sync.RWMutex
 	last     core.Snapshot
@@ -30,8 +31,8 @@ type Observer struct {
 	lastRestore map[string]time.Time
 }
 
-func New(cfg *config.Config, sd *systemd.Client) *Observer {
-	return &Observer{cfg: cfg, sd: sd, lastRestore: map[string]time.Time{}}
+func New(cfg *config.Config, sd *systemd.Client, coord *Coordinator) *Observer {
+	return &Observer{cfg: cfg, sd: sd, coord: coord, lastRestore: map[string]time.Time{}}
 }
 
 // OnChange registers a listener; must be called before Run.
@@ -112,6 +113,12 @@ func (o *Observer) autoRestore(ctx context.Context, s core.Snapshot) {
 		if !ok {
 			continue
 		}
+		// Auto-restore is a control action like any other: it must own the
+		// same per-device guard as API writes, or it races a manual
+		// transition and can enqueue jobs into a quarantined device.
+		if !o.coord.TryBeginRestore(d.ID) {
+			continue
+		}
 		o.lastRestore[d.ID] = time.Now()
 		log.Printf("supervisor: device %s degraded (desired %s), restarting %s",
 			d.ID, d.DesiredMode, det.Unit)
@@ -123,5 +130,6 @@ func (o *Observer) autoRestore(ctx context.Context, s core.Snapshot) {
 			log.Printf("supervisor: restart %s: %v", det.Unit, err)
 		}
 		cancel()
+		o.coord.EndTransition(d.ID)
 	}
 }

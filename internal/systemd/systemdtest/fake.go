@@ -163,6 +163,11 @@ func (f *Fake) run(ctx context.Context, name string, args ...string) (string, er
 		f.mu.Unlock()
 		return "", ctx.Err()
 	}
+	// Like exec.CommandContext, a command is never started with an already
+	// cancelled context — side effects must not leak past the deadline.
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if verbErr != nil {
 		return "", verbErr
 	}

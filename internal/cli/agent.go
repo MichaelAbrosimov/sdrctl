@@ -30,7 +30,10 @@ var agentCmd = &cobra.Command{
 			return err
 		}
 		sd := systemd.New()
-		obs := agent.New(cfg, sd)
+		// One coordinator = one per-device transition guard for the whole
+		// process: API writes and auto-restore share it.
+		coord := agent.NewCoordinator()
+		obs := agent.New(cfg, sd, coord)
 
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -46,7 +49,7 @@ var agentCmd = &cobra.Command{
 			}
 		}
 
-		srv := api.New(cfg, sd, obs)
+		srv := api.New(cfg, sd, obs, coord)
 
 		// The local socket is the primary control channel: always on while
 		// the agent runs, independent of the network API below. socketDone

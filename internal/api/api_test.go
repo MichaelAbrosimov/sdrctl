@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -32,7 +33,8 @@ func testConfig() *config.Config {
 
 func newServer(cfg *config.Config, f *systemdtest.Fake) *Server {
 	sd := f.Client()
-	return New(cfg, sd, agent.New(cfg, sd))
+	coord := agent.NewCoordinator()
+	return New(cfg, sd, agent.New(cfg, sd, coord), coord)
 }
 
 func idleUnits() map[string]*systemdtest.Unit {
@@ -200,6 +202,41 @@ func TestAmbiguousOutcomeQuarantinesDevice(t *testing.T) {
 	}
 	if res.Changed {
 		t.Errorf("landed job already put the device in rtl-tcp; expected a no-op, got %+v", res)
+	}
+}
+
+// SDR-P1-03 third-review item 2: a pending job survives the agent PROCESS,
+// so a fresh Server must not trust any device until it verifies quiescence
+// once — "pending job → new Server → write gets 409".
+func TestQuarantineSurvivesAgentRestart(t *testing.T) {
+	cfg := testConfig()
+	cfg.ModeSetTimeoutSec = 1
+	f := systemdtest.New(idleUnits())
+	f.HangVerb("enable")
+	f.LingerJob("enable")
+	f.KeepJobsOnCancel()
+
+	// "Previous process": leaves a pending job behind and dies.
+	_, err := core.SetMode(context.Background(), f.Client(), &cfg.Devices[0], "rtl-tcp", time.Second)
+	if err == nil {
+		t.Fatal("expected the seeding transition to fail")
+	}
+
+	// "New process": fresh Server over the same systemd state.
+	srv := newServer(cfg, f)
+	rec := httptest.NewRecorder()
+	srv.SocketHandler().ServeHTTP(rec, httptest.NewRequest("POST", "/mode/rtl-tcp", nil))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("first write of a fresh agent over a pending job: got %d (%s), want 409",
+			rec.Code, rec.Body.String())
+	}
+
+	// The job lands; the device becomes verifiably quiescent.
+	f.CompleteJobs()
+	rec = httptest.NewRecorder()
+	srv.SocketHandler().ServeHTTP(rec, httptest.NewRequest("POST", "/mode/rtl-tcp", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("write after quiescence: got %d (%s), want 200", rec.Code, rec.Body.String())
 	}
 }
 
