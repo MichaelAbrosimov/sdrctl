@@ -8,6 +8,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -24,6 +25,11 @@ type Config struct {
 	Socket   SocketConfig   `yaml:"socket"`
 	MQTT     MQTTConfig     `yaml:"mqtt"`
 	Observer ObserverConfig `yaml:"observer"`
+
+	// ModeSetTimeoutSec bounds one mode transition (disable competitors,
+	// enable target, verify the outcome). Used by the agent's executors and
+	// by the CLI's direct-systemctl fallback.
+	ModeSetTimeoutSec int `yaml:"mode_set_timeout_sec"`
 
 	// Services is single-device shorthand: when Devices is empty, these
 	// services are attached to one implicit default device.
@@ -74,6 +80,9 @@ type ObserverConfig struct {
 	// but inactive/failed while its device is present — e.g. after a dongle
 	// was re-plugged and systemd's StartLimit had been exhausted.
 	AutoRestore bool `yaml:"auto_restore"`
+	// RestoreCooldownSec limits auto-restore attempts per device so the
+	// agent never fights systemd's own StartLimit throttling.
+	RestoreCooldownSec int `yaml:"restore_cooldown_sec"`
 }
 
 type ServiceConfig struct {
@@ -131,9 +140,11 @@ func defaults() *Config {
 		Socket: SocketConfig{Path: "/run/sdrctl/sdrctl.sock", Group: "sdrctl"},
 		MQTT:   MQTTConfig{QoS: 1, Retain: true},
 		Observer: ObserverConfig{
-			IntervalSec: 5,
-			AutoRestore: true,
+			IntervalSec:        5,
+			AutoRestore:        true,
+			RestoreCooldownSec: 30,
 		},
+		ModeSetTimeoutSec: 15,
 	}
 }
 
@@ -152,6 +163,12 @@ func (c *Config) normalize() {
 	}
 	if c.Observer.IntervalSec < 1 {
 		c.Observer.IntervalSec = 5
+	}
+	if c.Observer.RestoreCooldownSec < 1 {
+		c.Observer.RestoreCooldownSec = 30
+	}
+	if c.ModeSetTimeoutSec < 1 {
+		c.ModeSetTimeoutSec = 15
 	}
 	if c.MQTT.ClientID == "" {
 		c.MQTT.ClientID = "sdrctl-" + c.Node.ID
@@ -239,6 +256,24 @@ func (c *Config) DefaultDevice() (*DeviceConfig, error) {
 		}
 	}
 	return nil, ErrNoDefaultDevice{}
+}
+
+// ModeSetTimeout returns ModeSetTimeoutSec as a duration, falling back to
+// the default when the config was built by hand without normalization.
+func (c *Config) ModeSetTimeout() time.Duration {
+	if c.ModeSetTimeoutSec < 1 {
+		return 15 * time.Second
+	}
+	return time.Duration(c.ModeSetTimeoutSec) * time.Second
+}
+
+// RestoreCooldown returns Observer.RestoreCooldownSec as a duration with the
+// same hand-built-config fallback.
+func (c *Config) RestoreCooldown() time.Duration {
+	if c.Observer.RestoreCooldownSec < 1 {
+		return 30 * time.Second
+	}
+	return time.Duration(c.Observer.RestoreCooldownSec) * time.Second
 }
 
 // DeviceByID looks a device up by its logical id.

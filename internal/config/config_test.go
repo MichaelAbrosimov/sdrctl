@@ -109,4 +109,16 @@ func TestMissingFileUsesDefaults(t *testing.T) {
 	if cfg.Socket.Path != "/run/sdrctl/sdrctl.sock" || cfg.Socket.Group != "sdrctl" {
 		t.Errorf("socket defaults not applied: %+v", cfg.Socket)
 	}
+	if cfg.ModeSetTimeoutSec != 15 || cfg.Observer.RestoreCooldownSec != 30 {
+		t.Errorf("timing defaults not applied: mode_set=%d cooldown=%d",
+			cfg.ModeSetTimeoutSec, cfg.Observer.RestoreCooldownSec)
+	}
+}
+
+func TestTimingHelpersFallBackOnHandBuiltConfig(t *testing.T) {
+	cfg := &Config{} // built directly, no normalize()
+	if cfg.ModeSetTimeout().Seconds() != 15 || cfg.RestoreCooldown().Seconds() != 30 {
+		t.Errorf("helpers must fall back to defaults: %v %v",
+			cfg.ModeSetTimeout(), cfg.RestoreCooldown())
+	}
 }

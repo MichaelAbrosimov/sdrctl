@@ -64,9 +64,12 @@ needs polkit):
 
 ```bash
 apt install -y polkitd
-cp polkit/50-sdrctl.rules /etc/polkit-1/rules.d/   # adjust the user name inside
+cp polkit/50-sdrctl.rules /etc/polkit-1/rules.d/   # group-based, no edits needed
 systemctl restart polkit
 ```
+
+The rule authorizes the same `sdrctl` group as the socket — one group is the
+whole "may control this node" concept on both paths.
 
 See "Root and privileges" and "Socket-first CLI" in docs/architecture.md for
 what exactly the rule grants and why enable/disable cannot be scoped per unit.

@@ -13,7 +13,7 @@ import (
 // locally built snapshot derives from the same sources of truth (systemd,
 // sysfs) and needs no privileges.
 func agentSnapshot(cfg *config.Config) (core.Snapshot, bool) {
-	if snap, err := agentclient.New(cfg.Socket.Path).Status(); err == nil {
+	if snap, err := agentclient.New(cfg.Socket.Path, cfg.ModeSetTimeout()).Status(); err == nil {
 		return snap, true
 	}
 	return core.BuildSnapshot(cfg, systemd.New()), false

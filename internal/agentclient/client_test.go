@@ -3,10 +3,11 @@ package agentclient
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestMissingSocketIsUnavailable(t *testing.T) {
-	c := New("/nonexistent/sdrctl.sock")
+	c := New("/nonexistent/sdrctl.sock", 15*time.Second)
 	_, err := c.Status()
 	if err == nil {
 		t.Fatal("expected an error for a missing socket")

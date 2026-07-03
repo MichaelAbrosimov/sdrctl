@@ -42,8 +42,14 @@ observer:
   # Restart a service that is enabled (desired) but inactive/failed while its
   # dongle is present — recovers after a re-plug once systemd's StartLimit
   # has been exhausted. The agent never fights systemd: attempts are limited
-  # to one per device per 30 seconds.
+  # to one per device per restore_cooldown_sec.
   auto_restore: true
+  restore_cooldown_sec: 30
+
+# How long one mode transition may take (disable competitors, enable target,
+# verify). Applies to the agent's executors and to the CLI fallback; the CLI
+# socket client waits this long plus a small margin.
+mode_set_timeout_sec: 15
 
 # --- Single-device form ------------------------------------------------------
 # With one dongle a top-level services block is enough; sdrctl turns it into

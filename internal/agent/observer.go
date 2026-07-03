@@ -18,10 +18,6 @@ import (
 	"github.com/MichaelAbrosimov/sdrctl/internal/systemd"
 )
 
-// restoreCooldown limits auto-restore attempts per device so the agent never
-// fights systemd's own StartLimit throttling.
-const restoreCooldown = 30 * time.Second
-
 type Observer struct {
 	cfg *config.Config
 	sd  *systemd.Client
@@ -103,7 +99,7 @@ func (o *Observer) autoRestore(s core.Snapshot) {
 		case core.ModeIdle, core.ModeConflict, core.ModeUnknown:
 			continue
 		}
-		if time.Since(o.lastRestore[d.ID]) < restoreCooldown {
+		if time.Since(o.lastRestore[d.ID]) < o.cfg.RestoreCooldown() {
 			continue
 		}
 		det, ok := d.ServiceInfo[d.DesiredMode]

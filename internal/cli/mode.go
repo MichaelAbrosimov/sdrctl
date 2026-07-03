@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -12,8 +11,6 @@ import (
 	"github.com/MichaelAbrosimov/sdrctl/internal/core"
 	"github.com/MichaelAbrosimov/sdrctl/internal/systemd"
 )
-
-const modeSetTimeout = 15 * time.Second
 
 var modeCmd = &cobra.Command{
 	Use:   "mode",
@@ -73,7 +70,7 @@ func printMode(cfg *config.Config, dev *config.DeviceConfig) error {
 // systemctl directly (via the polkit rule) — the node must stay controllable
 // while the agent is down.
 func runModeSet(cfg *config.Config, dev *config.DeviceConfig, target string) error {
-	res, err := agentclient.New(cfg.Socket.Path).SetMode(dev.ID, target)
+	res, err := agentclient.New(cfg.Socket.Path, cfg.ModeSetTimeout()).SetMode(dev.ID, target)
 	switch {
 	case err == nil:
 		return reportModeSet(res)
@@ -85,7 +82,7 @@ func runModeSet(cfg *config.Config, dev *config.DeviceConfig, target string) err
 		return fmt.Errorf("%s: %w", dev.ID, err)
 	}
 
-	res, err = core.SetMode(systemd.New(), dev, target, modeSetTimeout)
+	res, err = core.SetMode(systemd.New(), dev, target, cfg.ModeSetTimeout())
 	if err != nil {
 		return fmt.Errorf("%s: %w", dev.ID, err)
 	}

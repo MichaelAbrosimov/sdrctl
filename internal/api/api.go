@@ -21,8 +21,6 @@ import (
 	"github.com/MichaelAbrosimov/sdrctl/internal/systemd"
 )
 
-const setModeTimeout = 15 * time.Second
-
 type Server struct {
 	cfg *config.Config
 	sd  *systemd.Client
@@ -266,7 +264,7 @@ func (s *Server) setMode(w http.ResponseWriter, r *http.Request, id, mode string
 			// Publish the outcome (MQTT + fresh /status) right away.
 			s.obs.Refresh()
 		}()
-		if _, err := core.SetMode(s.sd, dev, mode, setModeTimeout); err != nil {
+		if _, err := core.SetMode(s.sd, dev, mode, s.cfg.ModeSetTimeout()); err != nil {
 			log.Printf("api: mode set %s/%s failed: %v", id, mode, err)
 		} else {
 			log.Printf("api: device %s switched to mode %s", id, mode)
@@ -302,7 +300,7 @@ func (s *Server) setModeSync(w http.ResponseWriter, id, mode string) {
 	}
 	defer s.release(id)
 
-	res, err := core.SetMode(s.sd, dev, mode, setModeTimeout)
+	res, err := core.SetMode(s.sd, dev, mode, s.cfg.ModeSetTimeout())
 	s.obs.Refresh()
 	if err != nil {
 		log.Printf("socket: mode set %s/%s failed: %v", id, mode, err)

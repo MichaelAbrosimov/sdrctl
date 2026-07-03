@@ -23,8 +23,9 @@ import (
 
 const (
 	readTimeout = 3 * time.Second
-	// writeTimeout must exceed the agent's synchronous mode-set timeout (15s).
-	writeTimeout = 30 * time.Second
+	// writeMargin is added on top of the agent's synchronous mode-set
+	// timeout, so the client always outwaits the agent's own deadline.
+	writeMargin = 5 * time.Second
 )
 
 // Unavailable marks transport-level failures where the agent could not be
@@ -46,7 +47,10 @@ type Client struct {
 	write *http.Client
 }
 
-func New(socketPath string) *Client {
+// New builds a client for the agent socket. modeSetTimeout is the agent's
+// synchronous transition deadline (config mode_set_timeout_sec): writes wait
+// that long plus a margin.
+func New(socketPath string, modeSetTimeout time.Duration) *Client {
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
@@ -55,7 +59,7 @@ func New(socketPath string) *Client {
 	}
 	return &Client{
 		read:  &http.Client{Transport: tr, Timeout: readTimeout},
-		write: &http.Client{Transport: tr, Timeout: writeTimeout},
+		write: &http.Client{Transport: tr, Timeout: modeSetTimeout + writeMargin},
 	}
 }
 

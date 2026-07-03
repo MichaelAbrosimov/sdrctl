@@ -108,9 +108,11 @@ auth model and duplicated write logic; the integration boundary stays HTTP.
 ## Root and privileges
 
 The agent runs as root (it drives systemctl). The CLI works without sudo for
-the operator user via `polkit/50-sdrctl.rules` + membership in the
-`systemd-journal` group (for `sdrctl logs`); read commands need no privileges
-at all once D-Bus is present.
+any user in the `sdrctl` group: the socket file grants the primary path, and
+`polkit/50-sdrctl.rules` authorizes the same group for the direct-systemctl
+fallback (no usernames hardcoded anywhere). `systemd-journal` membership is
+additionally needed for `sdrctl logs`; read commands need no privileges at
+all once D-Bus is present.
 
 Findings from the first deployment (systemd 257 / polkitd 126):
 

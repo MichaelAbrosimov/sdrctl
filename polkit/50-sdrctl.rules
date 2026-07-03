@@ -1,14 +1,22 @@
-// No-sudo SDR control for the operator user (michael).
+// No-sudo SDR control for operators — anyone in the "sdrctl" group.
+//
+// The same group that grants access to the agent's control socket also
+// authorizes the CLI's direct-systemctl fallback: one group = one concept of
+// "may control this node", no usernames hardcoded anywhere.
 //
 // manage-units (start/stop/restart/reset-failed) carries the unit name and
 // is scoped strictly to the SDR units. manage-unit-files (enable/disable)
 // carries NO details at all in systemd's polkit request (verified on
 // systemd 257 / polkitd 126), so per-unit scoping is impossible there —
 // it is granted wholesale. Accepted trade-off on this single-operator
-// appliance: michael is a sudoer anyway, and creating/modifying unit files
-// still requires root; this only covers enabling/disabling existing units.
+// appliance: creating/modifying unit files still requires root; this only
+// covers enabling/disabling existing units.
+//
+// The unit whitelist below mirrors the services in /etc/sdrctl/config.yaml
+// (polkit rules cannot read YAML) — extend it when adding modes or devices,
+// e.g. "rtl-tcp@rtl-sdr-01.service" for the multi-device template units.
 polkit.addRule(function (action, subject) {
-    if (subject.user != "michael")
+    if (!subject.isInGroup("sdrctl"))
         return polkit.Result.NOT_HANDLED;
 
     if (action.id == "org.freedesktop.systemd1.manage-units") {
