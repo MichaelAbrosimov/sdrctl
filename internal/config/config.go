@@ -16,6 +16,18 @@ import (
 // DefaultPath is the default location of the config file on the node.
 const DefaultPath = "/etc/sdrctl/config.yaml"
 
+// Defaults for configurable settings — each value lives here and nowhere
+// else in the code; anything network- or path-shaped must be one of these
+// or come from the config file.
+const (
+	DefaultAPIListen          = "0.0.0.0:8081"
+	DefaultSocketPath         = "/run/sdrctl/sdrctl.sock"
+	DefaultSocketGroup        = "sdrctl"
+	defaultModeSetTimeoutSec  = 15
+	defaultRestoreCooldownSec = 30
+	defaultObserverInterval   = 5
+)
+
 // Reserved mode names that cannot be used as service (mode) keys.
 var reservedModes = map[string]bool{"idle": true, "conflict": true, "unknown": true}
 
@@ -136,15 +148,15 @@ func defaults() *Config {
 	}
 	return &Config{
 		Node:   NodeConfig{ID: host, Role: "rtl-sdr-backend"},
-		API:    APIConfig{Enabled: true, Listen: "0.0.0.0:8081"},
-		Socket: SocketConfig{Path: "/run/sdrctl/sdrctl.sock", Group: "sdrctl"},
+		API:    APIConfig{Enabled: true, Listen: DefaultAPIListen},
+		Socket: SocketConfig{Path: DefaultSocketPath, Group: DefaultSocketGroup},
 		MQTT:   MQTTConfig{QoS: 1, Retain: true},
 		Observer: ObserverConfig{
-			IntervalSec:        5,
+			IntervalSec:        defaultObserverInterval,
 			AutoRestore:        true,
-			RestoreCooldownSec: 30,
+			RestoreCooldownSec: defaultRestoreCooldownSec,
 		},
-		ModeSetTimeoutSec: 15,
+		ModeSetTimeoutSec: defaultModeSetTimeoutSec,
 	}
 }
 
@@ -153,22 +165,22 @@ func (c *Config) normalize() {
 		c.Node.ID = "sdr-node"
 	}
 	if c.API.Listen == "" {
-		c.API.Listen = "0.0.0.0:8081"
+		c.API.Listen = DefaultAPIListen
 	}
 	if c.Socket.Path == "" {
-		c.Socket.Path = "/run/sdrctl/sdrctl.sock"
+		c.Socket.Path = DefaultSocketPath
 	}
 	if c.Socket.Group == "" {
-		c.Socket.Group = "sdrctl"
+		c.Socket.Group = DefaultSocketGroup
 	}
 	if c.Observer.IntervalSec < 1 {
-		c.Observer.IntervalSec = 5
+		c.Observer.IntervalSec = defaultObserverInterval
 	}
 	if c.Observer.RestoreCooldownSec < 1 {
-		c.Observer.RestoreCooldownSec = 30
+		c.Observer.RestoreCooldownSec = defaultRestoreCooldownSec
 	}
 	if c.ModeSetTimeoutSec < 1 {
-		c.ModeSetTimeoutSec = 15
+		c.ModeSetTimeoutSec = defaultModeSetTimeoutSec
 	}
 	if c.MQTT.ClientID == "" {
 		c.MQTT.ClientID = "sdrctl-" + c.Node.ID
@@ -262,7 +274,7 @@ func (c *Config) DefaultDevice() (*DeviceConfig, error) {
 // the default when the config was built by hand without normalization.
 func (c *Config) ModeSetTimeout() time.Duration {
 	if c.ModeSetTimeoutSec < 1 {
-		return 15 * time.Second
+		return defaultModeSetTimeoutSec * time.Second
 	}
 	return time.Duration(c.ModeSetTimeoutSec) * time.Second
 }
@@ -271,7 +283,7 @@ func (c *Config) ModeSetTimeout() time.Duration {
 // same hand-built-config fallback.
 func (c *Config) RestoreCooldown() time.Duration {
 	if c.Observer.RestoreCooldownSec < 1 {
-		return 30 * time.Second
+		return defaultRestoreCooldownSec * time.Second
 	}
 	return time.Duration(c.Observer.RestoreCooldownSec) * time.Second
 }

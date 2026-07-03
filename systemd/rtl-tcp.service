@@ -15,7 +15,13 @@ StartLimitIntervalSec=120
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/rtl_tcp -a 0.0.0.0 -p 1234
+# Defaults below; override without editing the unit by creating
+# /etc/sdrctl/rtl-tcp.env (same variables as configs/device.env.example).
+# Keep PORT in sync with services.rtl-tcp.port in /etc/sdrctl/config.yaml —
+# sdrctl only displays that port, the unit is what actually binds it.
+Environment=LISTEN_ADDR=0.0.0.0 PORT=1234 DEVICE_ARGS=
+EnvironmentFile=-/etc/sdrctl/rtl-tcp.env
+ExecStart=/usr/bin/rtl_tcp -a ${LISTEN_ADDR} -p ${PORT} ${DEVICE_ARGS}
 Restart=on-failure
 RestartSec=10
 
