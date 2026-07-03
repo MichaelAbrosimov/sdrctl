@@ -124,9 +124,9 @@ func TestSocketWriteReleasesInflightAfterTimeout(t *testing.T) {
 	}
 }
 
-// SDR-P1-03 review item 1: the whole socket write path must be bounded —
-// including the very first status reads. A hung `systemctl show` used to
-// hold the handler in the idempotency preflight before claim/SetMode.
+// SDR-P1-03 re-review item 3: the FULL socket handler — SetMode plus the
+// post-transition refresh — must answer within the configured timeout (plus
+// scheduler slack), not within 2× of it. The refresh is asynchronous now.
 func TestSocketWriteBoundedWhenShowHangs(t *testing.T) {
 	cfg := testConfig()
 	cfg.ModeSetTimeoutSec = 1
@@ -134,6 +134,7 @@ func TestSocketWriteBoundedWhenShowHangs(t *testing.T) {
 	f.HangVerb("show")
 	srv := newServer(cfg, f)
 
+	start := time.Now()
 	done := make(chan int, 1)
 	go func() {
 		rec := httptest.NewRecorder()
@@ -146,7 +147,80 @@ func TestSocketWriteBoundedWhenShowHangs(t *testing.T) {
 		if code == http.StatusOK {
 			t.Errorf("write with hung systemctl reported success (%d)", code)
 		}
+		// 1s configured + slack; the old synchronous refresh added a whole
+		// second ModeSetTimeout here.
+		if elapsed := time.Since(start); elapsed > 1900*time.Millisecond {
+			t.Errorf("full handler took %v — the caller-visible bound exceeds the configured timeout", elapsed)
+		}
 	case <-time.After(4 * time.Second):
 		t.Fatal("socket write handler is not bounded: still blocked with a hung systemctl show")
+	}
+}
+
+// SDR-P1-03 re-review item 1: an unverifiable cleanup quarantines the
+// device; writes are refused until the state is verified quiescent, then
+// allowed again.
+func TestAmbiguousOutcomeQuarantinesDevice(t *testing.T) {
+	cfg := testConfig()
+	cfg.ModeSetTimeoutSec = 1
+	f := systemdtest.New(idleUnits())
+	f.HangVerb("enable")
+	f.LingerJob("enable")
+	f.KeepJobsOnCancel() // cancel "succeeds" but the job stays → unverified
+
+	srv := newServer(cfg, f)
+
+	rec := httptest.NewRecorder()
+	srv.SocketHandler().ServeHTTP(rec, httptest.NewRequest("POST", "/mode/rtl-tcp", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("ambiguous transition: got %d (%s), want 500", rec.Code, rec.Body.String())
+	}
+
+	// The pending job is still there → the device must be quarantined.
+	rec = httptest.NewRecorder()
+	srv.SocketHandler().ServeHTTP(rec, httptest.NewRequest("POST", "/mode/rtl-tcp", nil))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("write on quarantined device: got %d (%s), want 409", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "quarantined") {
+		t.Errorf("409 should explain the quarantine, got: %s", rec.Body.String())
+	}
+
+	// PID 1 finishes the job; the device becomes verifiably quiescent and
+	// the next write goes through (idempotent 200: the job landed rtl-tcp).
+	f.CompleteJobs()
+	rec = httptest.NewRecorder()
+	srv.SocketHandler().ServeHTTP(rec, httptest.NewRequest("POST", "/mode/rtl-tcp", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("write after quiescence: got %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+	var res core.SetModeResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Changed {
+		t.Errorf("landed job already put the device in rtl-tcp; expected a no-op, got %+v", res)
+	}
+}
+
+// SDR-P1-03 re-review item 2: after WaitTransitions has begun, no new
+// transition may start — beginTransition and the closing flag share one
+// critical section, so the WaitGroup can never be raised from zero after
+// Wait started.
+func TestShutdownRejectsNewTransitions(t *testing.T) {
+	f := systemdtest.New(idleUnits())
+	srv := newServer(testConfig(), f)
+
+	srv.WaitTransitions() // no transitions in flight: sets closing, returns
+
+	rec := httptest.NewRecorder()
+	srv.SocketHandler().ServeHTTP(rec, httptest.NewRequest("POST", "/mode/rtl-tcp", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("write after shutdown began: got %d (%s), want 503", rec.Code, rec.Body.String())
+	}
+	for _, c := range f.Calls() {
+		if strings.Contains(c, "enable") || strings.Contains(c, "disable") {
+			t.Errorf("shutdown-rejected request still mutated systemd: %s", c)
+		}
 	}
 }

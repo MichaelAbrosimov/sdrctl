@@ -275,4 +275,85 @@ func TestSetModeCancelsPendingJobsOnTimeout(t *testing.T) {
 	if u := f.Unit("rtl-tcp.service"); u.Active == "active" || u.Enabled == "enabled" {
 		t.Errorf("queued job landed after the reported failure: %+v", u)
 	}
+	// The sweep verified the cleanup, so the failure is NOT ambiguous.
+	if errors.Is(err, ErrCleanupUnverified) {
+		t.Errorf("verified cleanup must not be reported as unverified: %v", err)
+	}
+}
+
+// SDR-P1-03 re-review item 1: every path where cleanup cannot be CONFIRMED
+// must surface ErrCleanupUnverified so the caller quarantines the device.
+func TestSetModeReportsUnverifiedCleanup(t *testing.T) {
+	cases := []struct {
+		name string
+		prep func(f *systemdtest.Fake)
+	}{
+		{"list-jobs fails", func(f *systemdtest.Fake) {
+			f.FailVerb("list-jobs", errors.New("dbus is down"))
+		}},
+		{"cancel fails", func(f *systemdtest.Fake) {
+			f.LingerJob("enable")
+			f.FailVerb("cancel", errors.New("dbus is down"))
+		}},
+		{"job survives a successful cancel", func(f *systemdtest.Fake) {
+			f.LingerJob("enable")
+			f.KeepJobsOnCancel()
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := systemdtest.New(map[string]*systemdtest.Unit{
+				"rtl-tcp.service": {Load: "loaded", Active: "inactive", Enabled: "disabled"},
+			})
+			f.HangVerb("enable")
+			tc.prep(f)
+
+			_, err := SetMode(context.Background(), f.Client(), testDevice(), "rtl-tcp", time.Second)
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if !errors.Is(err, ErrCleanupUnverified) {
+				t.Errorf("unverifiable cleanup must wrap ErrCleanupUnverified, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestDeviceQuiescent(t *testing.T) {
+	// Pending job → not quiescent.
+	f := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "inactive", Enabled: "disabled"},
+	})
+	f.HangVerb("enable")
+	f.LingerJob("enable")
+	f.KeepJobsOnCancel()
+	_, _ = SetMode(context.Background(), f.Client(), testDevice(), "rtl-tcp", 500*time.Millisecond)
+	if quiet, err := DeviceQuiescent(context.Background(), f.Client(), testDevice()); err != nil || quiet {
+		t.Errorf("device with a pending job reported quiescent=%v err=%v", quiet, err)
+	}
+
+	// Transitional ActiveState → not quiescent.
+	f2 := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "activating", Enabled: "enabled"},
+	})
+	if quiet, err := DeviceQuiescent(context.Background(), f2.Client(), testDevice()); err != nil || quiet {
+		t.Errorf("activating unit reported quiescent=%v err=%v", quiet, err)
+	}
+
+	// Stable state, no jobs → quiescent.
+	f3 := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "active", Enabled: "enabled"},
+	})
+	if quiet, err := DeviceQuiescent(context.Background(), f3.Client(), testDevice()); err != nil || !quiet {
+		t.Errorf("settled device reported quiescent=%v err=%v", quiet, err)
+	}
+
+	// Unobservable → error, never "quiescent".
+	f4 := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "inactive", Enabled: "disabled"},
+	})
+	f4.FailVerb("list-jobs", errors.New("dbus is down"))
+	if _, err := DeviceQuiescent(context.Background(), f4.Client(), testDevice()); err == nil {
+		t.Error("unobservable state must be an error, not a verdict")
+	}
 }

@@ -12,6 +12,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"sort"
@@ -296,11 +297,12 @@ const verifyPollInterval = 300 * time.Millisecond
 // rest bounds status reads, disable/enable and verification. A hung
 // systemctl cannot hold the caller (and the agent's inflight guard) past the
 // deadline: CommandContext kills the child. Killing systemctl does NOT
-// remove a job it already enqueued in PID 1, so the cleanup slice cancels
-// pending jobs of this device's units — otherwise a queued start/stop could
-// land after the inflight guard is released. Cleanup is best-effort: with a
-// dead D-Bus the cancel fails too, which is logged by the caller via the
-// returned error.
+// remove a job it already enqueued in PID 1, so on every failure after the
+// first mutation the cleanup slice sweeps pending jobs of this device's
+// units and CONFIRMS they are gone (sweepPendingJobs). When confirmation is
+// impossible — dead D-Bus, failing cancel, a job surviving cancel — the
+// returned error wraps ErrCleanupUnverified and the caller must quarantine
+// the device (refuse new writes) until it is verified quiescent.
 //
 // Success requires BOTH coordinates to converge: actual (ActiveState) and
 // desired (enabled flags). A competitor left enabled, or a target that runs
@@ -349,8 +351,11 @@ func SetMode(ctx context.Context, sd *systemd.Client, dev *config.DeviceConfig, 
 			continue
 		}
 		if err := sd.DisableNow(transCtx, sc.Systemd); err != nil {
-			if transCtx.Err() != nil {
-				cancelPendingJobs(overall, sd, dev)
+			// Any mutation error may leave an enqueued job behind — not
+			// only a context timeout: a D-Bus error after enqueue is just
+			// as ambiguous. Sweep and verify before returning.
+			if swErr := sweepPendingJobs(overall, sd, dev); swErr != nil {
+				return res, fmt.Errorf("disable %s: %v; %w", sc.Systemd, err, swErr)
 			}
 			return res, fmt.Errorf("disable %s: %w", sc.Systemd, err)
 		}
@@ -360,8 +365,8 @@ func SetMode(ctx context.Context, sd *systemd.Client, dev *config.DeviceConfig, 
 		// Clear a possible StartLimit throttle from earlier failures.
 		_ = sd.ResetFailed(transCtx, targetUnit)
 		if err := sd.EnableNow(transCtx, targetUnit); err != nil {
-			if transCtx.Err() != nil {
-				cancelPendingJobs(overall, sd, dev)
+			if swErr := sweepPendingJobs(overall, sd, dev); swErr != nil {
+				return res, fmt.Errorf("enable %s: %v; %w", targetUnit, err, swErr)
 			}
 			return res, fmt.Errorf("enable %s: %w", targetUnit, err)
 		}
@@ -381,11 +386,15 @@ func SetMode(ctx context.Context, sd *systemd.Client, dev *config.DeviceConfig, 
 		select {
 		case <-transCtx.Done():
 			// Cleanup within the reserved slice of the SAME deadline:
-			// cancel whatever this transition may have left queued in
+			// sweep whatever this transition may have left queued in
 			// PID 1, then take one diagnostic read for the error message.
-			cancelPendingJobs(overall, sd, dev)
+			swErr := sweepPendingJobs(overall, sd, dev)
 			cur, curDesired := DeviceModes(overall, sd, dev)
 			res.Mode = cur
+			if swErr != nil {
+				return res, fmt.Errorf("timed out waiting for mode %q (current: %s, desired: %s); %w",
+					target, cur, curDesired, swErr)
+			}
 			return res, fmt.Errorf("timed out waiting for mode %q (current: %s, desired: %s)",
 				target, cur, curDesired)
 		case <-time.After(verifyPollInterval):
@@ -393,19 +402,65 @@ func SetMode(ctx context.Context, sd *systemd.Client, dev *config.DeviceConfig, 
 	}
 }
 
-// cancelPendingJobs best-effort cancels queued systemd jobs of the device's
-// units, so a job enqueued before a deadline cannot land after the caller
-// has already reported failure and released its concurrency guard.
-func cancelPendingJobs(ctx context.Context, sd *systemd.Client, dev *config.DeviceConfig) {
+// ErrCleanupUnverified marks a failed transition whose cleanup could not be
+// CONFIRMED: pending systemd jobs of the device may still exist and land
+// later. Callers owning a concurrency guard must treat the device as
+// ambiguous and refuse new writes until the state is verified quiescent.
+var ErrCleanupUnverified = errors.New("cleanup after failed transition is unverified: pending systemd jobs may still apply")
+
+// sweepPendingJobs cancels queued systemd jobs of the device's units and
+// CONFIRMS they are gone by re-listing. Every failure path — listing,
+// cancelling, or a job surviving a formally successful cancel — returns an
+// error wrapping ErrCleanupUnverified; nil means "verified: nothing of this
+// device is pending in PID 1".
+func sweepPendingJobs(ctx context.Context, sd *systemd.Client, dev *config.DeviceConfig) error {
 	jobs, err := sd.PendingJobs(ctx)
 	if err != nil {
-		return
+		return fmt.Errorf("%w: list-jobs: %v", ErrCleanupUnverified, err)
 	}
 	for _, sc := range dev.Services {
 		if id, ok := jobs[sc.Systemd]; ok {
-			_ = sd.CancelJob(ctx, id)
+			if err := sd.CancelJob(ctx, id); err != nil {
+				return fmt.Errorf("%w: cancel job %s (%s): %v", ErrCleanupUnverified, id, sc.Systemd, err)
+			}
 		}
 	}
+	jobs, err = sd.PendingJobs(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: recheck after cancel: %v", ErrCleanupUnverified, err)
+	}
+	for _, sc := range dev.Services {
+		if id, ok := jobs[sc.Systemd]; ok {
+			return fmt.Errorf("%w: job %s (%s) still pending after cancel", ErrCleanupUnverified, id, sc.Systemd)
+		}
+	}
+	return nil
+}
+
+// DeviceQuiescent reports whether the device is verifiably at rest: no
+// pending systemd jobs touch its units and no unit is in a transitional
+// ActiveState. An unobservable state (list-jobs failing, unit state
+// unknown) is an error, not "quiescent" — absence of evidence is not
+// evidence of absence here.
+func DeviceQuiescent(ctx context.Context, sd *systemd.Client, dev *config.DeviceConfig) (bool, error) {
+	jobs, err := sd.PendingJobs(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, sc := range dev.Services {
+		if _, ok := jobs[sc.Systemd]; ok {
+			return false, nil
+		}
+	}
+	for _, sc := range dev.Services {
+		switch st := sd.UnitStatus(ctx, sc.Systemd); st.Active {
+		case "activating", "deactivating", "reloading":
+			return false, nil
+		case "unknown":
+			return false, fmt.Errorf("unit %s state is unobservable", sc.Systemd)
+		}
+	}
+	return true, nil
 }
 
 // LANIP returns the first global unicast IPv4 address of the host.

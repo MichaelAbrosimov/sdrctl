@@ -36,6 +36,7 @@ type Fake struct {
 	hang          map[string]bool
 	linger        map[string]bool
 	stickyEnabled map[string]bool
+	keepOnCancel  bool
 	jobs          []pendingJob
 	nextJobID     int
 }
@@ -103,6 +104,15 @@ func (f *Fake) CompleteJobs() {
 		}
 	}
 	f.jobs = nil
+}
+
+// KeepJobsOnCancel makes `systemctl cancel` report success without removing
+// the job — the failure mode where only the post-cancel re-listing can
+// prove that cleanup did not actually happen.
+func (f *Fake) KeepJobsOnCancel() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.keepOnCancel = true
 }
 
 // StickyEnabled makes disable of the unit report success and stop it while
@@ -194,6 +204,9 @@ func (f *Fake) run(ctx context.Context, name string, args ...string) (string, er
 		}
 		return b.String(), nil
 	case "cancel":
+		if f.keepOnCancel {
+			return "", nil
+		}
 		id := args[1]
 		kept := f.jobs[:0]
 		for _, j := range f.jobs {
