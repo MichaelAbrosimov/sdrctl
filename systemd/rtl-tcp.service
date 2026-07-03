@@ -1,0 +1,23 @@
+# Single-device rtl_tcp unit (deploy-time example).
+# Install: cp systemd/rtl-tcp.service /etc/systemd/system/
+#
+# Mode semantics live in systemd, not in sdrctl code:
+#   Conflicts=   one dongle = one active SDR mode
+#   Restart=     crash recovery (sdrctl does not supervise)
+#   enabled      desired mode (sdrctl mode set = enable/disable --now)
+[Unit]
+Description=rtl_tcp SDR server
+After=network-online.target
+Wants=network-online.target
+Conflicts=rtl-433.service spyserver.service
+StartLimitBurst=3
+StartLimitIntervalSec=120
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/rtl_tcp -a 0.0.0.0 -p 1234
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

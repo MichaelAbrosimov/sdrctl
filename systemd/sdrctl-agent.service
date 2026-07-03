@@ -1,0 +1,18 @@
+# Install: cp systemd/sdrctl-agent.service /etc/systemd/system/
+#          systemctl daemon-reload && systemctl enable --now sdrctl-agent
+[Unit]
+Description=SDR Control Agent (sdrctl)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sdrctl agent --config /etc/sdrctl/config.yaml
+Restart=on-failure
+RestartSec=3
+# root is acceptable in v0.1: the agent drives systemctl. A tighter setup via
+# polkit rules for org.freedesktop.systemd1 is documented in docs/architecture.md.
+User=root
+
+[Install]
+WantedBy=multi-user.target

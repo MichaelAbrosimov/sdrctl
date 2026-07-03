@@ -1,0 +1,23 @@
+# Multi-device rtl_tcp template; instance name = sdrctl device id,
+# e.g. rtl-tcp@rtl-sdr-01.service.
+# Install: cp systemd/rtl-tcp@.service /etc/systemd/system/
+#          cp configs/device.env.example /etc/sdrctl/devices/rtl-sdr-01.env
+[Unit]
+Description=rtl_tcp SDR server (%i)
+After=network-online.target
+Wants=network-online.target
+Conflicts=rtl-433@%i.service spyserver@%i.service
+StartLimitBurst=3
+StartLimitIntervalSec=120
+# Optional: bind the instance to the physical dongle so systemd stops it
+# immediately on unplug — see udev/99-sdrctl-rtlsdr.rules for the drop-in.
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/sdrctl/devices/%i.env
+ExecStart=/usr/bin/rtl_tcp -a ${LISTEN_ADDR} -p ${PORT} ${DEVICE_ARGS}
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

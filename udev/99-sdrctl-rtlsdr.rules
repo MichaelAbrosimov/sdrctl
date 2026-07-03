@@ -1,0 +1,22 @@
+# Optional refinement: bind SDR service instances to the physical dongle so
+# systemd stops them immediately on unplug instead of letting the process
+# crash into a Restart loop.
+#
+# Even WITHOUT these rules the node behaves correctly: on unplug the service
+# crashes, systemd retries (Restart=/StartLimit*), the unit ends up "failed",
+# sdrctl reports the device as degraded/missing, and after re-plug the agent's
+# auto_restore brings the desired mode back.
+#
+# Recovery on re-plug is deliberately NOT done via ENV{SYSTEMD_WANTS}: a
+# device-Wants would start the service even when the desired mode is idle.
+#
+# 1) Tag the dongle (one rule per device, adjust the serial):
+# SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2838", ATTRS{serial}=="00000001", TAG+="systemd", ENV{SYSTEMD_ALIAS}="/sys/subsystem/usb/devices/rtl-sdr-01"
+#
+# 2) Add a drop-in for the matching service instance,
+#    /etc/systemd/system/rtl-tcp@rtl-sdr-01.service.d/bind.conf:
+#      [Unit]
+#      BindsTo=sys-subsystem-usb-devices-rtl\x2dsdr\x2d01.device
+#      After=sys-subsystem-usb-devices-rtl\x2dsdr\x2d01.device
+#
+# 3) Reload: udevadm control --reload && systemctl daemon-reload

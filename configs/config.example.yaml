@@ -1,0 +1,82 @@
+# sdrctl configuration. Copy to /etc/sdrctl/config.yaml and adjust.
+#
+# Runtime state lives in systemd, not here and not in any state file:
+#   actual mode  = which SDR unit is active
+#   desired mode = which SDR unit is enabled
+
+node:
+  id: wyse-sdr-01
+  role: rtl-sdr-backend
+
+api:
+  enabled: true
+  listen: "0.0.0.0:8081"
+  # Write endpoints (POST /mode/..., POST /devices/<id>/mode/...) stay off
+  # until BOTH write_enabled is true and a token is set. Read API is always
+  # available while api.enabled is true.
+  write_enabled: false
+  token: ""
+
+mqtt:
+  enabled: false
+  broker: "tcp://192.168.0.10:1883"
+  # Defaults: client_id = sdrctl-<node id>, topic_prefix = sdr/<node id>
+  client_id: ""
+  topic_prefix: ""
+  username: ""
+  password: ""
+  qos: 1
+  retain: true
+  heartbeat_sec: 0   # 0 = publish on state change only
+
+observer:
+  interval_sec: 5
+  # Restart a service that is enabled (desired) but inactive/failed while its
+  # dongle is present — recovers after a re-plug once systemd's StartLimit
+  # has been exhausted. The agent never fights systemd: attempts are limited
+  # to one per device per 30 seconds.
+  auto_restore: true
+
+# --- Single-device form ------------------------------------------------------
+# With one dongle a top-level services block is enough; sdrctl turns it into
+# one implicit default device "rtl-sdr-01". Service keys are the mode names.
+
+services:
+  rtl-tcp:
+    systemd: rtl-tcp.service
+    port: 1234
+  rtl-433:
+    systemd: rtl-433.service
+    optional: true
+  spyserver:
+    systemd: spyserver.service
+    optional: true
+
+# --- Multi-device form -------------------------------------------------------
+# Remove the services block above and describe each dongle explicitly.
+# RTL-SDR Blog V4 dongles all ship with serial 00000001 — assign unique
+# serials with rtl_eeprom BEFORE configuring several of them (see
+# docs/install-wyse-sdr-01.md).
+#
+# devices:
+#   - id: rtl-sdr-01
+#     type: rtl-sdr            # implies usb ids 0bda:2838
+#     label: "RTL-SDR Blog V4 main"
+#     serial: "00000001"
+#     default: true
+#     services:
+#       rtl-tcp:
+#         systemd: "rtl-tcp@rtl-sdr-01.service"
+#         port: 1234
+#   - id: rtl-sdr-02
+#     type: rtl-sdr
+#     label: "RTL-SDR secondary"
+#     serial: "00000002"
+#     optional: true           # missing optional device never breaks global health
+#     services:
+#       rtl-tcp:
+#         systemd: "rtl-tcp@rtl-sdr-02.service"
+#         port: 1235
+#       rtl-433:
+#         systemd: "rtl-433@rtl-sdr-02.service"
+#         optional: true
