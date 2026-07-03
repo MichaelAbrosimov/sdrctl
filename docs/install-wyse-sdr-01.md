@@ -8,6 +8,9 @@ minimal disk writes.
 
 ```bash
 apt update && apt install -y rtl-sdr        # rtl_tcp, rtl_test, rtl_eeprom
+# Minimal DietPi images lack D-Bus; without it systemctl queries (and thus
+# sdrctl status) fail for non-root users:
+apt install -y dbus && systemctl enable --now dbus.socket
 # Kernel DVB drivers must not grab the dongle:
 cat >/etc/modprobe.d/blacklist-rtlsdr.conf <<'EOF'
 blacklist dvb_usb_rtl28xxu
