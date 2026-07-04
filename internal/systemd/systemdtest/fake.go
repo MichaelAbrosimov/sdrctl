@@ -25,7 +25,23 @@ type Unit struct {
 type pendingJob struct {
 	id   int
 	unit string
-	verb string // enable | disable
+	verb string // enable | disable | restart
+}
+
+// unitArg extracts the unit name from a systemctl argument list: verbs with
+// --now carry it third, plain verbs (restart, reset-failed) second.
+func unitArg(verb string, args []string) string {
+	switch verb {
+	case "enable", "disable":
+		if len(args) >= 3 {
+			return args[2]
+		}
+	case "restart", "reset-failed":
+		if len(args) >= 2 {
+			return args[1]
+		}
+	}
+	return ""
 }
 
 type Fake struct {
@@ -71,6 +87,14 @@ func (f *Fake) HangVerb(verb string) {
 	f.hang[verb] = true
 }
 
+// UnhangVerb removes a previously configured hang for the verb, e.g. to
+// model "systemd responds again in the next process".
+func (f *Fake) UnhangVerb(verb string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.hang, verb)
+}
+
 // LingerJob makes a hung verb leave a pending job behind when its context
 // is cancelled — modelling systemd semantics where killing the systemctl
 // client does not remove the job it already enqueued in PID 1. The job is
@@ -101,6 +125,8 @@ func (f *Fake) CompleteJobs() {
 			if !f.stickyEnabled[j.unit] {
 				u.Enabled = "disabled"
 			}
+		case "restart":
+			u.Active = "active"
 		}
 	}
 	f.jobs = nil
@@ -156,9 +182,11 @@ func (f *Fake) run(ctx context.Context, name string, args ...string) (string, er
 	if hang {
 		<-ctx.Done()
 		f.mu.Lock()
-		if f.linger[verb] && len(args) >= 3 {
-			f.jobs = append(f.jobs, pendingJob{id: f.nextJobID, unit: args[2], verb: verb})
-			f.nextJobID++
+		if f.linger[verb] {
+			if unit := unitArg(verb, args); unit != "" {
+				f.jobs = append(f.jobs, pendingJob{id: f.nextJobID, unit: unit, verb: verb})
+				f.nextJobID++
+			}
 		}
 		f.mu.Unlock()
 		return "", ctx.Err()
@@ -199,6 +227,13 @@ func (f *Fake) run(ctx context.Context, name string, args ...string) (string, er
 		if !f.stickyEnabled[args[2]] {
 			u.Enabled = "disabled"
 		}
+		return "", nil
+	case "restart":
+		u := f.units[args[1]]
+		if u == nil || u.Load == "not-found" {
+			return "", fmt.Errorf("unit %s not found", args[1])
+		}
+		u.Active = "active"
 		return "", nil
 	case "reset-failed":
 		return "", nil

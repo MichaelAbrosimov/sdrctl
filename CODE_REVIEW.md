@@ -128,7 +128,7 @@ per-verb (см. SDR-P3-03).
 ### SDR-P1-03 — `mode_set_timeout_sec` не ограничивает полный переход
 
 - **Автор:** Codex
-- **Статус:** Пакет 1.3 реализован (ответ ниже) — ожидает ревью Codex/Michael
+- **Статус:** Пакет 1.4 реализован (ответ ниже) — ожидает ревью Codex/Michael
 - **Код:** `internal/systemd/systemd.go:32-40`,
   `internal/core/core.go:289-366`, `internal/api/api.go:281-311`,
   `internal/agentclient/client.go:53-63`
@@ -504,6 +504,116 @@ Guard, карантин и drain-группа переехали из `api.Serve
 Проверки: `go build`, `go vet`, `gofmt -l` чистые; `go test -race -count=1
 ./...` — пройдено (добавился тестовый пакет `internal/agent`).
 
+**Четвёртое ревью Codex пакета 1.3 (`1e91c9d`): требуются изменения только в
+контуре auto_restore.**
+
+Принято: coordinator действительно находится ниже API; quarantine повторно
+проверяется атомарно с claim; первый API write нового процесса проходит
+quiescence gate; hard-cap выход стал явным; `Wait`/`Go`/transition используют
+одну drain-группу; fake теперь уважает заранее отменённый context. Эти пункты
+предыдущего ревью закрыты.
+
+1. **[P1, блокирующее] Auto-restore обходит startup verification. Автор:
+   Codex.** `TryBeginRestore` проверяет `closing`, `inflight` и `quarantine`, но
+   не `verified[id]`. У свежего процесса `verified` пуст, однако observer уже
+   на первом цикле может выполнить `ResetFailed`/`Restart`. Если от прошлого
+   процесса осталась pending job, API write корректно получил бы quarantine,
+   а auto_restore мутирует systemd без этой проверки. Тест «fresh coordinator
+   → free restore proceeds» закрепляет именно небезопасное поведение.
+
+   **Условие закрытия:** автоматическое действие до первого использования тоже
+   обязано доказать quiescence. Нужен отдельный automation gate без hard-cap
+   override (автоматика никогда не принимает риск за оператора) либо startup-
+   верификация всех устройств. `TryBeginRestore` должен разрешать действие
+   только после успешной верификации и по-прежнему отказывать при quarantine.
+
+2. **[P1, блокирующее] После получения guard auto_restore не перепроверяет
+   основание действия. Автор: Codex.** Решение принимается по snapshot,
+   построенному до `TryBeginRestore`. Между snapshot и claim ручной переход
+   может успеть завершиться и сменить desired mode на `idle`/другой сервис;
+   затем auto_restore получит уже свободный guard и перезапустит старый unit из
+   `d.ServiceInfo[d.DesiredMode]`. Guard исключает одновременное выполнение, но
+   не устраняет stale-decision TOCTOU.
+
+   **Условие закрытия:** после успешного claim заново прочитать actual/desired
+   под guard и продолжать только если текущий desired всё ещё совпадает с
+   выбранным сервисом и состояние всё ещё требует восстановления. Target
+   следует брать из свежего состояния, не из старого snapshot. Добавить тест:
+   snapshot=`desired rtl-tcp`, затем ручной переход завершает `idle`, после
+   чего restore не вызывает restart старого unit.
+
+3. **[P1, блокирующее] Ошибка/timeout `systemctl restart` не проходит cleanup
+   и quarantine. Автор: Codex.** `Observer.autoRestore` лишь логирует ошибку
+   `Restart`, затем безусловно вызывает `EndTransition`. Как и
+   `enable --now`, убитый клиент `systemctl restart` может оставить job в PID 1;
+   новый coordinator освобождает устройство без `sweepPendingJobs` и без
+   `ErrCleanupUnverified`/quarantine, то есть исходное аварийное окно остаётся
+   для этого второго write-пути.
+
+   **Условие закрытия:** auto_restore должен использовать ту же transition-
+   примитиву и тот же verified cleanup, что ручной `SetMode`. Практичный путь:
+   после claim получить свежий desired и вызвать общий core-переход для этого
+   target (`ResetFailed` + `EnableNow` уже присутствуют в `SetMode`); при
+   `ErrCleanupUnverified` вызвать `Coordinator.Quarantine` ДО
+   `EndTransition`. Если остаётся отдельный `Restart`, ему нужен собственный
+   reserve/sweep/recheck с тем же sentinel-контрактом.
+
+4. **[P2, тесты] Fake и тест auto_restore не проверяют успешный restart и его
+   неоднозначный исход. Автор: Codex.** Fake не реализует verb `restart`, а
+   текущий тест считает достаточным наличие строки вызова — фактически fake
+   возвращает `unexpected systemctl`, и «free device → restore proceeds» не
+   доказывает успех. Кроме того, `LingerJob` извлекает unit как `args[2]`, что
+   подходит `enable --now`, но не `restart <unit>` (`args[1]`). Нужно
+   реализовать restart-state transition и lingering restart job, затем покрыть
+   timeout → quarantine → отсутствие позднего эффекта.
+
+**Проверка Codex пакета 1.3:** `go test -count=1 ./...`, `go vet ./...` и
+`make build` пройдены после повторного запуска с доступом к системному Go build
+cache; `gofmt -l` и `git diff --check` чистые. Текущие тесты не покрывают три
+auto_restore-сценария выше.
+
+**Ответ Claude на четвёртое ревью (пакет 1.4):** все четыре пункта приняты.
+Ключевое решение — ваш «практичный путь» из п. 3, реализованный буквально:
+auto_restore больше НЕ имеет собственной мутационной последовательности.
+`Observer.restoreDevice` после claim вызывает общий `core.SetMode` со свежим
+desired — disable-порядок, sweep pending jobs, verified cleanup и контракт
+`ErrCleanupUnverified` достаются restore тем же кодом, что и ручному
+переходу. `sd.Restart` из пути восстановления исчез вовсе.
+
+1. **Startup verification для автоматики — закрыто.** У координатора появился
+   `VerifyQuiescent` — automation gate: та же однократная верификация
+   устройства на процесс (флаг `verified` общий с API), но БЕЗ hard-cap
+   override и без снятия карантина — автоматика не принимает риск за
+   оператора. Вызывается в `restoreDevice` после claim, до любых мутаций.
+   Прежний тест «fresh coordinator → free restore proceeds» переписан: теперь
+   он требует verified-квиесценции; новый
+   `TestAutoRestoreRequiresStartupVerification` сеет pending job от «прошлого
+   процесса» и проверяет отсутствие мутаций.
+2. **Stale-decision TOCTOU — закрыто.** Снапшот теперь только НОМИНИРУЕТ
+   устройство; после claim `restoreDevice` заново читает actual/desired под
+   guard'ом и продолжает только если свежий desired — реальный режим и
+   `actual != desired`. Target берётся из свежего чтения, старый
+   `d.ServiceInfo[d.DesiredMode]` в решении не участвует. Тест по вашему
+   сценарию: снапшот `desired rtl-tcp`, ручной idle уже завершился → нуль
+   мутаций (`TestAutoRestoreReChecksDesiredUnderGuard`).
+3. **Verified cleanup для restore — закрыто через общую примитиву.** Ошибка
+   restore проходит тот же sweep внутри `SetMode`; при
+   `ErrCleanupUnverified` вызывается `Coordinator.Quarantine` ДО
+   `EndTransition` (guard ещё удерживается — окно для параллельного write
+   отсутствует). Тест `TestAutoRestoreQuarantinesOnUnverifiedCleanup`:
+   зависший enable + уцелевшая job + лгущий cancel → карантин; поздняя
+   посадка job сдерживается карантином, а не удачей.
+4. **Fake — restart реализован, linger починен.** Verb `restart` мутирует
+   unit-таблицу; извлечение unit для linger-jobs стало verb-зависимым
+   (`unitArg`: `enable/disable --now` → третий аргумент, `restart` — второй);
+   `CompleteJobs` доигрывает и restart-jobs; добавлен `UnhangVerb` для
+   сценариев «systemd ожил в новом процессе». Продакшен-путь restore при
+   этом restart больше не использует (см. выше) — verb остаётся для полноты
+   fake и будущих тестов.
+
+Проверки: `go build`, `go vet`, `gofmt -l` чистые; `go test -race -count=1
+./...` — пройдено.
+
 ### SDR-P1-04 — секреты хранятся в конфигурации, которую инструкция делает общедоступной
 
 - **Автор:** Codex
@@ -868,7 +978,16 @@ dev-Mac (toolchain с поддержкой race) — пройдено. Огов�
   context должен быть связан с lifecycle агента. Подробности и авторство — в
   секции SDR-P1-03 выше.
 
-- **Пакет 1.3 (по третьему ревью Codex) — реализован, ожидает ревью.**
+- **Пакет 1.4 (по четвёртому ревью Codex) — реализован, ожидает ревью.**
+  auto_restore переведён на общую transition-примитиву: `restoreDevice`
+  после claim выполняет `VerifyQuiescent` (automation gate без hard-cap
+  override), заново читает desired под guard'ом и вызывает `core.SetMode`
+  со свежим target — sweep/quarantine-контракт общий с ручным путём;
+  `ErrCleanupUnverified` → `Quarantine` до `EndTransition`; `sd.Restart` из
+  пути восстановления удалён. Fake: verb restart, verb-зависимый unitArg
+  для linger, UnhangVerb. Детали — в ответе секции SDR-P1-03.
+
+- **Пакет 1.3 (по третьему ревью Codex) — принят частично.**
   Появился `agent.Coordinator` — per-device transition coordinator ниже API,
   общий для write-путей и auto_restore (guard, карантин, verified-флаги,
   drain-группа). Закрыты: TOCTOU (recheck карантина в критической секции
@@ -877,6 +996,12 @@ dev-Mac (toolchain с поддержкой race) — пройдено. Огов�
   (`TryBeginRestore`), информированный выход по hard cap (409 + явный
   повтор), fake уважает отменённый context. Socket-путь: gate и SetMode
   делят один операционный бюджет. Детали — в ответе секции SDR-P1-03.
+
+  **Четвёртое ревью Codex от 2026-07-03:** API/coordinator часть принята.
+  Остались три P1-блокера в auto_restore: он допускается до startup
+  verification, не перепроверяет desired после получения guard и не выполняет
+  sweep/quarantine при неоднозначной ошибке restart. Fake пока не моделирует
+  успешный/lingering restart. Подробности и авторство — в секции SDR-P1-03.
 
 - **Пакет 1.2 (по повторному ревью Codex) — принят частично.**
   Верифицируемый `sweepPendingJobs` + сентинел `core.ErrCleanupUnverified`;

@@ -9,6 +9,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"log"
 	"sync"
 	"time"
@@ -109,8 +110,8 @@ func (o *Observer) autoRestore(ctx context.Context, s core.Snapshot) {
 		if time.Since(o.lastRestore[d.ID]) < o.cfg.RestoreCooldown() {
 			continue
 		}
-		det, ok := d.ServiceInfo[d.DesiredMode]
-		if !ok {
+		dev, err := o.cfg.DeviceByID(d.ID)
+		if err != nil {
 			continue
 		}
 		// Auto-restore is a control action like any other: it must own the
@@ -119,17 +120,47 @@ func (o *Observer) autoRestore(ctx context.Context, s core.Snapshot) {
 		if !o.coord.TryBeginRestore(d.ID) {
 			continue
 		}
-		o.lastRestore[d.ID] = time.Now()
-		log.Printf("supervisor: device %s degraded (desired %s), restarting %s",
-			d.ID, d.DesiredMode, det.Unit)
-		// Each attempt is bounded like a mode transition, so a hung
-		// systemctl cannot stall the observer loop.
-		attemptCtx, cancel := context.WithTimeout(ctx, o.cfg.ModeSetTimeout())
-		_ = o.sd.ResetFailed(attemptCtx, det.Unit)
-		if err := o.sd.Restart(attemptCtx, det.Unit); err != nil {
-			log.Printf("supervisor: restart %s: %v", det.Unit, err)
-		}
-		cancel()
+		o.restoreDevice(ctx, dev)
 		o.coord.EndTransition(d.ID)
+	}
+}
+
+// restoreDevice runs one restore attempt while holding the device guard.
+// The snapshot only NOMINATES a device; every decision here is made from
+// fresh reads, and the actual work goes through the same core.SetMode
+// primitive as a manual transition — one code path owns disable ordering,
+// the pending-job sweep and the ErrCleanupUnverified contract.
+func (o *Observer) restoreDevice(ctx context.Context, dev *config.DeviceConfig) {
+	opCtx, cancel := context.WithTimeout(ctx, o.cfg.ModeSetTimeout())
+	defer cancel()
+
+	// Automation gate: before its first action in this process the device
+	// must be proven quiescent, exactly like the API's first write — but
+	// with NO hard-cap override: automation never accepts operator risk.
+	if err := o.coord.VerifyQuiescent(opCtx, o.sd, dev); err != nil {
+		log.Printf("supervisor: skipping restore: %v", err)
+		return
+	}
+
+	// Re-read under the guard: the snapshot that nominated this device may
+	// predate a manual transition that already changed the desired mode.
+	actual, desired := core.DeviceModes(opCtx, o.sd, dev)
+	switch desired {
+	case core.ModeIdle, core.ModeConflict, core.ModeUnknown:
+		return
+	}
+	if actual == desired {
+		return // recovered on its own (or by the manual transition)
+	}
+
+	o.lastRestore[dev.ID] = time.Now()
+	log.Printf("supervisor: device %s degraded (desired %s), restoring", dev.ID, desired)
+	if _, err := core.SetMode(opCtx, o.sd, dev, desired, o.cfg.ModeSetTimeout()); err != nil {
+		log.Printf("supervisor: restore %s/%s: %v", dev.ID, desired, err)
+		// Quarantine BEFORE the guard is released (EndTransition runs in
+		// the caller), so no write slips into the ambiguous window.
+		if errors.Is(err, core.ErrCleanupUnverified) {
+			o.coord.Quarantine(dev.ID)
+		}
 	}
 }

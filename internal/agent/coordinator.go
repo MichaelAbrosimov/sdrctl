@@ -174,6 +174,36 @@ func (c *Coordinator) GateWrite(ctx context.Context, sd *systemd.Client, dev *co
 	return fmt.Errorf("device %s is quarantined: pending systemd activity from an earlier transition has not settled; writes are refused", dev.ID)
 }
 
+// VerifyQuiescent is the automation-grade verification gate: unlike
+// GateWrite it NEVER applies the hard-cap override — automation must not
+// accept risk on the operator's behalf — and never lifts a quarantine.
+// A device is trusted only after one proven quiescence per process; success
+// marks it verified for everyone (the API's first write reuses the flag).
+// Callers must hold the device guard.
+func (c *Coordinator) VerifyQuiescent(ctx context.Context, sd *systemd.Client, dev *config.DeviceConfig) error {
+	c.mu.Lock()
+	_, quarantined := c.quarantine[dev.ID]
+	verified := c.verified[dev.ID]
+	c.mu.Unlock()
+	if quarantined {
+		return fmt.Errorf("device %s is quarantined", dev.ID)
+	}
+	if verified {
+		return nil
+	}
+	quiet, err := core.DeviceQuiescent(ctx, sd, dev)
+	if err != nil {
+		return fmt.Errorf("device %s cannot be verified quiescent: %w", dev.ID, err)
+	}
+	if !quiet {
+		return fmt.Errorf("device %s has pending systemd activity", dev.ID)
+	}
+	c.mu.Lock()
+	c.verified[dev.ID] = true
+	c.mu.Unlock()
+	return nil
+}
+
 // Go runs fn asynchronously inside the drain group, unless shutdown has
 // already begun.
 func (c *Coordinator) Go(fn func()) {

@@ -17,6 +17,8 @@ func coordTestConfig() *config.Config {
 			AutoRestore:        true,
 			RestoreCooldownSec: 1,
 		},
+		// Keep hand-built-config fallbacks (15s) out of test runtimes.
+		ModeSetTimeoutSec: 1,
 		Devices: []config.DeviceConfig{{
 			ID:      "rtl-sdr-01",
 			Type:    "rtl-sdr",
@@ -26,6 +28,22 @@ func coordTestConfig() *config.Config {
 			},
 		}},
 	}
+}
+
+// degradedSnapshot nominates rtl-sdr-01 for restore: desired rtl-tcp, not
+// running.
+func degradedSnapshot() core.Snapshot {
+	return core.Snapshot{Devices: []core.DeviceStatus{{
+		ID:            "rtl-sdr-01",
+		PresenceKnown: true,
+		Present:       true,
+		Mode:          core.ModeIdle,
+		DesiredMode:   "rtl-tcp",
+		Health:        core.HealthDegraded,
+		ServiceInfo: map[string]core.ServiceDetail{
+			"rtl-tcp": {Unit: "rtl-tcp.service"},
+		},
+	}}}
 }
 
 // SDR-P1-03 third-review item 1: a quarantine set after an external gate
@@ -69,22 +87,17 @@ func TestGateWriteHardCapIsInformedExit(t *testing.T) {
 	}
 }
 
+// mutated reports whether any systemctl call in the log changes state.
+func mutated(calls []string) bool {
+	joined := strings.Join(calls, "\n")
+	return strings.Contains(joined, "enable") || strings.Contains(joined, "disable") ||
+		strings.Contains(joined, "restart")
+}
+
 // SDR-P1-03 third-review item 3: auto-restore goes through the same guard
 // as manual transitions — while a device is claimed (or quarantined), the
 // observer must not touch systemd for it.
 func TestAutoRestoreRespectsCoordinator(t *testing.T) {
-	degraded := core.Snapshot{Devices: []core.DeviceStatus{{
-		ID:            "rtl-sdr-01",
-		PresenceKnown: true,
-		Present:       true,
-		Mode:          core.ModeIdle,
-		DesiredMode:   "rtl-tcp",
-		Health:        core.HealthDegraded,
-		ServiceInfo: map[string]core.ServiceDetail{
-			"rtl-tcp": {Unit: "rtl-tcp.service"},
-		},
-	}}}
-
 	// Manual transition in flight → no restore.
 	f := systemdtest.New(map[string]*systemdtest.Unit{
 		"rtl-tcp.service": {Load: "loaded", Active: "inactive", Enabled: "enabled"},
@@ -94,30 +107,103 @@ func TestAutoRestoreRespectsCoordinator(t *testing.T) {
 	if err := coord.BeginTransition("rtl-sdr-01"); err != nil {
 		t.Fatal(err)
 	}
-	obs.autoRestore(context.Background(), degraded)
-	if calls := strings.Join(f.Calls(), "\n"); strings.Contains(calls, "restart") {
-		t.Errorf("auto-restore ran during a manual transition:\n%s", calls)
+	obs.autoRestore(context.Background(), degradedSnapshot())
+	if mutated(f.Calls()) {
+		t.Errorf("auto-restore ran during a manual transition:\n%s", strings.Join(f.Calls(), "\n"))
 	}
 	coord.EndTransition("rtl-sdr-01")
 
 	// Quarantined device → no restore either.
 	coord.Quarantine("rtl-sdr-01")
-	obs.autoRestore(context.Background(), degraded)
-	if calls := strings.Join(f.Calls(), "\n"); strings.Contains(calls, "restart") {
-		t.Errorf("auto-restore created jobs inside a quarantined device:\n%s", calls)
+	obs.autoRestore(context.Background(), degradedSnapshot())
+	if mutated(f.Calls()) {
+		t.Errorf("auto-restore created jobs inside a quarantined device:\n%s", strings.Join(f.Calls(), "\n"))
 	}
 
-	// Free device → restore proceeds and releases the guard afterwards.
+	// Free, verifiably quiescent device → restore proceeds through the
+	// shared SetMode primitive and releases the guard afterwards.
 	f2 := systemdtest.New(map[string]*systemdtest.Unit{
 		"rtl-tcp.service": {Load: "loaded", Active: "inactive", Enabled: "enabled"},
 	})
 	coord2 := NewCoordinator()
 	obs2 := New(coordTestConfig(), f2.Client(), coord2)
-	obs2.autoRestore(context.Background(), degraded)
-	if calls := strings.Join(f2.Calls(), "\n"); !strings.Contains(calls, "restart rtl-tcp.service") {
-		t.Errorf("free device was not restored:\n%s", calls)
+	obs2.autoRestore(context.Background(), degradedSnapshot())
+	if !strings.Contains(strings.Join(f2.Calls(), "\n"), "enable --now rtl-tcp.service") {
+		t.Errorf("free device was not restored:\n%s", strings.Join(f2.Calls(), "\n"))
+	}
+	if u := f2.Unit("rtl-tcp.service"); u.Active != "active" {
+		t.Errorf("restore did not actually start the unit: %+v", u)
 	}
 	if err := coord2.BeginTransition("rtl-sdr-01"); err != nil {
 		t.Errorf("guard was not released after auto-restore: %v", err)
+	}
+}
+
+// SDR-P1-03 fourth-review item 1: automation must prove quiescence before
+// its first action in a fresh process — a pending job from the previous
+// process blocks auto-restore just like it blocks the first API write.
+func TestAutoRestoreRequiresStartupVerification(t *testing.T) {
+	cfg := coordTestConfig()
+	f := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "inactive", Enabled: "enabled"},
+	})
+	// Seed a pending job from the "previous process".
+	f.HangVerb("enable")
+	f.LingerJob("enable")
+	f.KeepJobsOnCancel()
+	_, _ = core.SetMode(context.Background(), f.Client(), &cfg.Devices[0], "rtl-tcp", cfg.ModeSetTimeout())
+	f.UnhangVerb("enable")
+	before := len(f.Calls())
+
+	coord := NewCoordinator()
+	obs := New(cfg, f.Client(), coord)
+	obs.autoRestore(context.Background(), degradedSnapshot())
+	if mutated(f.Calls()[before:]) {
+		t.Errorf("auto-restore mutated systemd despite an unverified device:\n%s",
+			strings.Join(f.Calls()[before:], "\n"))
+	}
+}
+
+// SDR-P1-03 fourth-review item 2: the snapshot only nominates; the decision
+// is re-made from fresh reads under the guard. A manual idle that landed
+// after the snapshot must cancel the restore.
+func TestAutoRestoreReChecksDesiredUnderGuard(t *testing.T) {
+	// The snapshot claims desired rtl-tcp, but by now a manual transition
+	// has disabled everything (desired = idle).
+	f := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "inactive", Enabled: "disabled"},
+	})
+	coord := NewCoordinator()
+	obs := New(coordTestConfig(), f.Client(), coord)
+	obs.autoRestore(context.Background(), degradedSnapshot())
+	if mutated(f.Calls()) {
+		t.Errorf("auto-restore acted on a stale snapshot decision:\n%s", strings.Join(f.Calls(), "\n"))
+	}
+}
+
+// SDR-P1-03 fourth-review item 3: a restore whose cleanup cannot be
+// verified must quarantine the device BEFORE releasing the guard — the
+// same ErrCleanupUnverified contract as a manual transition.
+func TestAutoRestoreQuarantinesOnUnverifiedCleanup(t *testing.T) {
+	f := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "inactive", Enabled: "enabled"},
+	})
+	coord := NewCoordinator()
+	obs := New(coordTestConfig(), f.Client(), coord)
+
+	// The restore's own enable hangs, leaves a job, and cancel lies.
+	f.HangVerb("enable")
+	f.LingerJob("enable")
+	f.KeepJobsOnCancel()
+	obs.autoRestore(context.Background(), degradedSnapshot())
+
+	if err := coord.BeginTransition("rtl-sdr-01"); err == nil {
+		t.Fatal("device with unverified restore cleanup was not quarantined")
+	}
+	// The late-landing job is contained by the quarantine, not by luck:
+	// even after it lands, writes stay gated until verification.
+	f.CompleteJobs()
+	if got := coord.TryBeginRestore("rtl-sdr-01"); got {
+		t.Error("auto-restore may not re-enter a quarantined device")
 	}
 }
