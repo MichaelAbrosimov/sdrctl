@@ -52,7 +52,7 @@
 ### SDR-P1-01 — неизвестное состояние агрегируется как здоровое
 
 - **Автор:** Codex
-- **Статус:** Подтверждено (Claude), к исправлению
+- **Статус:** Реализовано пакетом 2 — ожидает ревью Codex/Michael
 - **Код:** `internal/core/core.go:215-244`, особенно `:226`
 - **Связанный контракт:** `docs/spec.md` и `docs/api.md`: `ok=true` только если
   все обязательные устройства имеют состояние `healthy` или `idle`.
@@ -80,6 +80,14 @@
 без systemd `sdrctl status` начнёт показывать `ok=false` — это честнее
 текущего `idle`, принимаем. Исправлять одним пакетом с SDR-P2-05: одна зона
 кода, общий набор тестов агрегации.
+
+**Реализация (пакет 2):** `aggregate` — unknown ломает ok, приоритет
+глобального health: conflict (определённая проблема, два владельца донгла) >
+unknown (может скрывать что угодно) > degraded; optional-исключение только
+для подтверждённого отсутствия. Тесты: таблица
+`TestAggregateUnknownBreaksOK` (включая «unobservable optional НЕ
+нейтрален») и e2e `TestSnapshotUnknownWhenSystemdUnobservable` (сломанный
+`systemctl show` ⇒ `ok=false, health=unknown`). api.md уточнён.
 
 ### SDR-P1-02 — ошибка `disable --now` может быть проигнорирована, а переход признан успешным
 
@@ -714,7 +722,7 @@ warning `DuplicateSerials` ловит одинаковые серийники Ж
 ### SDR-P2-01 — агент запускается без конфигурации и сообщает `ok=true`
 
 - **Автор:** Codex
-- **Статус:** Подтверждено (Claude), к исправлению
+- **Статус:** Реализовано пакетом 2 — ожидает ревью Codex/Michael
 - **Код:** `internal/config/config.go:118-141`,
   `internal/cli/root.go:44-51`, `internal/cli/agent.go:27-34`,
   `internal/core/core.go:215-244`
@@ -735,6 +743,11 @@ read-CLI на свежем хосте, но наследование этого 
 неотличим от исправного узла. Согласен с фиксом ровно в предложенном виде:
 `sdrctl agent` требует `cfg.Loaded && len(cfg.Devices) > 0`, обход — только
 явным флагом. Правка на несколько строк в agent.go RunE.
+
+**Реализация (пакет 2):** `config.RequireForAgent()` (Loaded + ≥1 device,
+сообщения объясняют «почему»), вызывается в agent RunE; dev-обход — флаг
+`--allow-empty-config`. Тест `TestRequireForAgent`; smoke на dev-хосте:
+агент отказывается стартовать без файла.
 
 ### SDR-P2-02 — конкурентные `Observer.Refresh` могут вернуть состояние назад во времени
 
@@ -798,7 +811,7 @@ RuntimeDirectory, отдельного файла не плодить.
 ### SDR-P2-04 — auto-restore выполняется при неизвестном наличии устройства
 
 - **Автор:** Codex
-- **Статус:** Подтверждено (Claude), к исправлению
+- **Статус:** Реализовано пакетом 2 — ожидает ревью Codex/Michael
 - **Код:** `internal/agent/observer.go:87-115`, особенно `:95-97`
 - **Связанный контракт:** `docs/architecture.md`: restore выполняется, когда
   донгл присутствует.
@@ -821,10 +834,15 @@ auto-restore отключится совсем — для нашего узла 
 сторона, в которую стоит ошибаться (control action требует позитивного
 подтверждения). Неизвестность — в лог с rate limit, не спамить каждый тик.
 
+**Реализация (пакет 2):** фильтр в `autoRestore` — только
+`PresenceKnown && Present` (без лога на каждый тик: устройство и так видно
+как degraded/unknown в снапшоте). Тест
+`TestAutoRestoreNeedsConfirmedPresence`.
+
 ### SDR-P2-05 — actual и desired используют один общий флаг неизвестности
 
 - **Автор:** Codex
-- **Статус:** Подтверждено (Claude), к исправлению вместе с SDR-P1-01
+- **Статус:** Реализовано пакетом 2 — ожидает ревью Codex/Michael
 - **Код:** `internal/core/core.go:133-164`, `:247-265`
 
 `anyUnknown` выставляется только по `ActiveState`, после чего применяется и к
@@ -843,6 +861,11 @@ actual mode, и к desired mode. Частично полученный отве�
 `buildDevice` и `DeviceModes` + тесты частичных ответов `systemctl show`.
 Исправлять в одном пакете с SDR-P1-01 — семантика unknown должна поменяться
 согласованно на обоих уровнях (unit → device → aggregate).
+
+**Реализация (пакет 2):** раздельные `activeUnknown`/`enabledUnknown` в
+`buildDevice` и `DeviceModes` (unknown `UnitFileState` больше не маскируется
+под idle, а проблема одного лишь `ActiveState` не заражает desired). Тест
+`TestDeviceModesIndependentUnknown` на оба частичных ответа.
 
 ---
 
@@ -1002,6 +1025,15 @@ dev-Mac (toolchain с поддержкой race) — пройдено. Огов�
   diagnostic probe расширяет фактический timeout на 2 секунды; operation
   context должен быть связан с lifecycle агента. Подробности и авторство — в
   секции SDR-P1-03 выше.
+
+- **Пакет 2 (health: SDR-P1-01 + SDR-P2-01 + SDR-P2-04 + SDR-P2-05) —
+  реализован, ожидает ревью.** Раздельные `activeUnknown`/`enabledUnknown`
+  в buildDevice/DeviceModes; `aggregate`: unknown ломает ok, приоритет
+  conflict > unknown > degraded, optional-исключение только для
+  подтверждённого отсутствия; auto_restore только при
+  `PresenceKnown && Present`; агент требует конфиг и ≥1 устройство
+  (`RequireForAgent`, dev-обход `--allow-empty-config`); api.md уточнён.
+  Детали — в приписках «Реализация (пакет 2)» в соответствующих секциях.
 
 - **Пакет 1.4 (по четвёртому ревью Codex) — принят, P1-03 закрыто.**
   auto_restore переведён на общую transition-примитиву: `restoreDevice`

@@ -181,6 +181,24 @@ func TestAutoRestoreReChecksDesiredUnderGuard(t *testing.T) {
 	}
 }
 
+// SDR-P2-04: a control action needs POSITIVE evidence of the dongle — a
+// failed sysfs read (presence unknown) must not trigger a restore.
+func TestAutoRestoreNeedsConfirmedPresence(t *testing.T) {
+	snap := degradedSnapshot()
+	snap.Devices[0].PresenceKnown = false
+	snap.Devices[0].Present = false
+
+	f := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "inactive", Enabled: "enabled"},
+	})
+	coord := NewCoordinator()
+	obs := New(coordTestConfig(), f.Client(), coord)
+	obs.autoRestore(context.Background(), snap)
+	if mutated(f.Calls()) {
+		t.Errorf("auto-restore acted on unknown presence:\n%s", strings.Join(f.Calls(), "\n"))
+	}
+}
+
 // SDR-P1-03 fourth-review item 3: a restore whose cleanup cannot be
 // verified must quarantine the device BEFORE releasing the guard — the
 // same ErrCleanupUnverified contract as a manual transition.

@@ -64,6 +64,93 @@ func TestDeviceModesDetection(t *testing.T) {
 	}
 }
 
+// SDR-P2-05: the two mode coordinates track unknown-ness independently — a
+// partial systemctl answer must neither hide an unknown UnitFileState
+// behind "idle" nor poison a known desired mode via ActiveState alone.
+func TestDeviceModesIndependentUnknown(t *testing.T) {
+	f := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "active", Enabled: "unknown"},
+	})
+	actual, desired := DeviceModes(context.Background(), f.Client(), testDevice())
+	if actual != "rtl-tcp" || desired != ModeUnknown {
+		t.Errorf("unknown UnitFileState: got actual=%s desired=%s, want rtl-tcp/unknown", actual, desired)
+	}
+
+	f2 := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "unknown", Enabled: "enabled"},
+	})
+	actual, desired = DeviceModes(context.Background(), f2.Client(), testDevice())
+	if actual != ModeUnknown || desired != "rtl-tcp" {
+		t.Errorf("unknown ActiveState: got actual=%s desired=%s, want unknown/rtl-tcp", actual, desired)
+	}
+}
+
+// SDR-P1-01: unknown breaks global ok — "cannot observe" is not "fine".
+// The optional-device exception covers only CONFIRMED absence.
+func TestAggregateUnknownBreaksOK(t *testing.T) {
+	cases := []struct {
+		name       string
+		devices    []DeviceStatus
+		wantOK     bool
+		wantHealth string
+	}{
+		{
+			"required unknown breaks ok",
+			[]DeviceStatus{{Health: HealthUnknown}},
+			false, HealthUnknown,
+		},
+		{
+			"confirmed-absent optional stays neutral",
+			[]DeviceStatus{
+				{Health: HealthHealthy},
+				{Optional: true, PresenceKnown: true, Present: false, Health: HealthMissing},
+			},
+			true, HealthHealthy,
+		},
+		{
+			"unobservable optional is NOT neutral",
+			[]DeviceStatus{
+				{Health: HealthHealthy},
+				{Optional: true, PresenceKnown: false, Health: HealthUnknown},
+			},
+			false, HealthUnknown,
+		},
+		{
+			"conflict is louder than unknown",
+			[]DeviceStatus{{Health: HealthConflict}, {Health: HealthUnknown}},
+			false, HealthConflict,
+		},
+		{
+			"unknown is louder than degraded",
+			[]DeviceStatus{{Health: HealthDegraded}, {Health: HealthUnknown}},
+			false, HealthUnknown,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, health := aggregate(tc.devices)
+			if ok != tc.wantOK || health != tc.wantHealth {
+				t.Errorf("got ok=%v health=%s, want %v/%s", ok, health, tc.wantOK, tc.wantHealth)
+			}
+		})
+	}
+}
+
+// SDR-P1-01 end to end: with systemd unobservable the snapshot must say so
+// instead of reporting a healthy idle node to the orchestrator.
+func TestSnapshotUnknownWhenSystemdUnobservable(t *testing.T) {
+	f := systemdtest.New(map[string]*systemdtest.Unit{})
+	f.FailVerb("show", errors.New("dbus is down"))
+	cfg := &config.Config{
+		Node:    config.NodeConfig{ID: "test-node"},
+		Devices: []config.DeviceConfig{*testDevice()},
+	}
+	snap := BuildSnapshot(context.Background(), cfg, f.Client())
+	if snap.OK || snap.Health != HealthUnknown {
+		t.Errorf("unobservable systemd reported ok=%v health=%s; want false/unknown", snap.OK, snap.Health)
+	}
+}
+
 func TestHealthFor(t *testing.T) {
 	cases := []struct {
 		name string

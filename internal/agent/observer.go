@@ -100,8 +100,12 @@ func (o *Observer) autoRestore(ctx context.Context, s core.Snapshot) {
 		if d.Health != core.HealthDegraded {
 			continue
 		}
-		if d.PresenceKnown && !d.Present {
-			continue // dongle is gone; nothing to restore until it returns
+		if !d.PresenceKnown || !d.Present {
+			// A control action needs POSITIVE evidence of the dongle: a
+			// failed sysfs read must not be treated as presence. On hosts
+			// without USB detection auto-restore is deliberately inert —
+			// the conservative side of the error.
+			continue
 		}
 		switch d.DesiredMode {
 		case core.ModeIdle, core.ModeConflict, core.ModeUnknown:

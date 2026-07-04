@@ -132,8 +132,12 @@ func buildDevice(ctx context.Context, dc config.DeviceConfig, sd *systemd.Client
 		Ports:         map[string]int{},
 	}
 
+	// The two mode coordinates track unknown-ness INDEPENDENTLY: a partial
+	// systemctl answer must neither hide an unknown UnitFileState behind
+	// "idle" nor poison a perfectly known desired mode because only the
+	// ActiveState read failed.
 	var running, enabled []string
-	anyUnknown := false
+	activeUnknown, enabledUnknown := false, false
 	for name, sc := range dc.Services {
 		st := sd.UnitStatus(ctx, sc.Systemd)
 		ds.Services[name] = st.Active
@@ -150,7 +154,10 @@ func buildDevice(ctx context.Context, dc config.DeviceConfig, sd *systemd.Client
 			ds.Ports[name] = sc.Port
 		}
 		if st.Active == "unknown" {
-			anyUnknown = true
+			activeUnknown = true
+		}
+		if st.Enabled == "unknown" {
+			enabledUnknown = true
 		}
 		if st.IsRunning() {
 			running = append(running, name)
@@ -161,8 +168,8 @@ func buildDevice(ctx context.Context, dc config.DeviceConfig, sd *systemd.Client
 	}
 	sort.Strings(running)
 	sort.Strings(enabled)
-	ds.Mode = modeFrom(running, anyUnknown)
-	ds.DesiredMode = modeFrom(enabled, anyUnknown)
+	ds.Mode = modeFrom(running, activeUnknown)
+	ds.DesiredMode = modeFrom(enabled, enabledUnknown)
 
 	if presenceKnown {
 		matched := device.Match(usb, dc.USBVendorID, dc.USBProductID, dc.Serial)
@@ -214,19 +221,30 @@ func HealthFor(d DeviceStatus) string {
 	}
 }
 
+// aggregate derives global ok/health. Contract (docs/api.md): ok is true
+// only if every required device is healthy or idle — an UNKNOWN required
+// device therefore breaks ok: "cannot observe" is not "fine". The optional-
+// device exception applies only to CONFIRMED absence (presence known and
+// not present), never to unobservability. Global health picks the loudest
+// problem: conflict (definite, two owners of one dongle) over unknown
+// (could hide anything) over degraded.
 func aggregate(devices []DeviceStatus) (bool, string) {
 	ok := true
 	anyHealthy := false
 	anyConflict := false
+	anyUnknown := false
 	for _, d := range devices {
 		if d.Optional && d.PresenceKnown && !d.Present {
-			continue // optional missing devices never break global health
+			continue // confirmed-absent optional devices never break global health
 		}
 		switch d.Health {
 		case HealthHealthy:
 			anyHealthy = true
-		case HealthIdle, HealthUnknown:
+		case HealthIdle:
 			// neutral
+		case HealthUnknown:
+			ok = false
+			anyUnknown = true
 		case HealthConflict:
 			ok = false
 			anyConflict = true
@@ -235,8 +253,10 @@ func aggregate(devices []DeviceStatus) (bool, string) {
 		}
 	}
 	switch {
-	case !ok && anyConflict:
+	case anyConflict:
 		return false, HealthConflict
+	case anyUnknown:
+		return false, HealthUnknown
 	case !ok:
 		return false, HealthDegraded
 	case anyHealthy:
@@ -246,14 +266,18 @@ func aggregate(devices []DeviceStatus) (bool, string) {
 	}
 }
 
-// DeviceModes returns the actual and desired mode of one device.
+// DeviceModes returns the actual and desired mode of one device. The two
+// coordinates track unknown-ness independently (see buildDevice).
 func DeviceModes(ctx context.Context, sd *systemd.Client, dev *config.DeviceConfig) (actual, desired string) {
 	var running, enabled []string
-	anyUnknown := false
+	activeUnknown, enabledUnknown := false, false
 	for name, sc := range dev.Services {
 		st := sd.UnitStatus(ctx, sc.Systemd)
 		if st.Active == "unknown" {
-			anyUnknown = true
+			activeUnknown = true
+		}
+		if st.Enabled == "unknown" {
+			enabledUnknown = true
 		}
 		if st.IsRunning() {
 			running = append(running, name)
@@ -264,7 +288,7 @@ func DeviceModes(ctx context.Context, sd *systemd.Client, dev *config.DeviceConf
 	}
 	sort.Strings(running)
 	sort.Strings(enabled)
-	return modeFrom(running, anyUnknown), modeFrom(enabled, anyUnknown)
+	return modeFrom(running, activeUnknown), modeFrom(enabled, enabledUnknown)
 }
 
 type SetModeResult struct {

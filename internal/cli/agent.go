@@ -20,6 +20,8 @@ import (
 	"github.com/MichaelAbrosimov/sdrctl/internal/version"
 )
 
+var allowEmptyConfig bool
+
 var agentCmd = &cobra.Command{
 	Use:   "agent",
 	Short: "Run the sdrctl agent (HTTP API, state observer, MQTT telemetry)",
@@ -28,6 +30,11 @@ var agentCmd = &cobra.Command{
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
+		}
+		if !allowEmptyConfig {
+			if err := cfg.RequireForAgent(); err != nil {
+				return err
+			}
 		}
 		sd := systemd.New()
 		// One coordinator = one per-device transition guard for the whole
@@ -90,7 +97,11 @@ var agentCmd = &cobra.Command{
 	},
 }
 
-func init() { rootCmd.AddCommand(agentCmd) }
+func init() {
+	agentCmd.Flags().BoolVar(&allowEmptyConfig, "allow-empty-config", false,
+		"start without a loaded config/devices (dev only; an empty agent reports no devices)")
+	rootCmd.AddCommand(agentCmd)
+}
 
 func heartbeat(ctx context.Context, pub *mqtt.Publisher, obs *agent.Observer, every time.Duration) {
 	ticker := time.NewTicker(every)

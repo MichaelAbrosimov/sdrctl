@@ -115,6 +115,38 @@ func TestMissingFileUsesDefaults(t *testing.T) {
 	}
 }
 
+// SDR-P2-01: the daemon refuses defaults — an empty agent reporting ok=true
+// misleads monitoring; the soft path stays for read-only CLI use.
+func TestRequireForAgent(t *testing.T) {
+	missing, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := missing.RequireForAgent(); err == nil {
+		t.Error("agent accepted a missing config file")
+	}
+
+	empty, err := Load(writeConfig(t, "node:\n  id: x\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := empty.RequireForAgent(); err == nil {
+		t.Error("agent accepted a config without devices")
+	}
+
+	good, err := Load(writeConfig(t, `
+services:
+  rtl-tcp:
+    systemd: rtl-tcp.service
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := good.RequireForAgent(); err != nil {
+		t.Errorf("valid config rejected: %v", err)
+	}
+}
+
 func TestTimingHelpersFallBackOnHandBuiltConfig(t *testing.T) {
 	cfg := &Config{} // built directly, no normalize()
 	if cfg.ModeSetTimeout().Seconds() != 15 || cfg.RestoreCooldown().Seconds() != 30 {

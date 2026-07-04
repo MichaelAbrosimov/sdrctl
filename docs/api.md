@@ -18,8 +18,11 @@ All responses are JSON. Read endpoints need no auth.
 ```
 
 `ok` is true only if all required devices are `healthy` or `idle`; optional
-missing devices do not affect it. HTTP status is always 200 while the agent is
-alive — liveness is the transport, node health is the body.
+devices whose absence is CONFIRMED do not affect it. An `unknown` device —
+systemd or sysfs unobservable — makes `ok=false` with health `unknown`:
+"cannot observe" is never reported as "fine". HTTP status is always 200
+while the agent is alive — liveness is the transport, node health is the
+body.
 
 ### GET /status
 

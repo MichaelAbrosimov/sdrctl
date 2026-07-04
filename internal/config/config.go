@@ -270,6 +270,20 @@ func (c *Config) DefaultDevice() (*DeviceConfig, error) {
 	return nil, ErrNoDefaultDevice{}
 }
 
+// RequireForAgent enforces the daemon's stricter contract: a real config
+// file and at least one device. The soft "missing file → defaults" path
+// stays for read-only CLI commands on fresh hosts, but an agent running on
+// defaults would report an empty node as healthy and mislead monitoring.
+func (c *Config) RequireForAgent() error {
+	if !c.Loaded {
+		return fmt.Errorf("config %s not found — the agent refuses to run on defaults (override for dev: --allow-empty-config)", c.Path)
+	}
+	if len(c.Devices) == 0 {
+		return fmt.Errorf("config %s defines no SDR devices — an empty agent would look healthy to monitoring (override for dev: --allow-empty-config)", c.Path)
+	}
+	return nil
+}
+
 // ModeSetTimeout returns ModeSetTimeoutSec as a duration, falling back to
 // the default when the config was built by hand without normalization.
 func (c *Config) ModeSetTimeout() time.Duration {
