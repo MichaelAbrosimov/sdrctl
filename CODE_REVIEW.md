@@ -128,7 +128,7 @@ per-verb (см. SDR-P3-03).
 ### SDR-P1-03 — `mode_set_timeout_sec` не ограничивает полный переход
 
 - **Автор:** Codex
-- **Статус:** Пакет 1.4 реализован (ответ ниже) — ожидает ревью Codex/Michael
+- **Статус:** Исправление принято Codex (`e9873f0`) — P1-03 закрыто, ожидает подтверждения Michael
 - **Код:** `internal/systemd/systemd.go:32-40`,
   `internal/core/core.go:289-366`, `internal/api/api.go:281-311`,
   `internal/agentclient/client.go:53-63`
@@ -614,6 +614,31 @@ desired — disable-порядок, sweep pending jobs, verified cleanup и ко
 Проверки: `go build`, `go vet`, `gofmt -l` чистые; `go test -race -count=1
 ./...` — пройдено.
 
+**Пятое ревью Codex пакета 1.4 (`e9873f0`): принято, P1-03 закрыто.**
+
+- **Автор ревью:** Codex
+- Automation startup verification выполняется под уже полученным per-device
+  guard через `VerifyQuiescent`; автоматика не использует hard-cap override и
+  не снимает quarantine.
+- Старый snapshot только номинирует кандидата: actual/desired перечитываются
+  под guard, а target берётся из свежего desired. Сценарий «после snapshot уже
+  установлен idle» корректно превращается в no-op.
+- Auto-restore использует общий `core.SetMode`; timeout, pending-job sweep,
+  повторная проверка cleanup и `ErrCleanupUnverified` совпадают с ручным путём.
+  Quarantine выставляется до `EndTransition`, поэтому окна для следующего
+  write нет.
+- Fake теперь корректно уважает отменённый context, моделирует restart и
+  verb-зависимый lingering job; новые regression tests проверяют startup job,
+  stale desired и unverified cleanup.
+
+Блокирующих замечаний по SDR-P1-03 больше нет. Оставшиеся N стабильных
+наблюдений settling и правило «restore только при подтверждённом присутствии»
+уже учтены в SDR-P2-02/SDR-P2-04 и не блокируют закрытие этого P1.
+
+**Проверка Codex пакета 1.4:** `go test -count=1 ./...`, `go vet ./...` и
+`make build` пройдены с доступом к системному Go build cache; `gofmt -l` и
+`git diff --check` чистые. Собранная версия: `v0.1.0-14-ge9873f0`.
+
 ### SDR-P1-04 — секреты хранятся в конфигурации, которую инструкция делает общедоступной
 
 - **Автор:** Codex
@@ -978,7 +1003,7 @@ dev-Mac (toolchain с поддержкой race) — пройдено. Огов�
   context должен быть связан с lifecycle агента. Подробности и авторство — в
   секции SDR-P1-03 выше.
 
-- **Пакет 1.4 (по четвёртому ревью Codex) — реализован, ожидает ревью.**
+- **Пакет 1.4 (по четвёртому ревью Codex) — принят, P1-03 закрыто.**
   auto_restore переведён на общую transition-примитиву: `restoreDevice`
   после claim выполняет `VerifyQuiescent` (automation gate без hard-cap
   override), заново читает desired под guard'ом и вызывает `core.SetMode`
@@ -986,6 +1011,11 @@ dev-Mac (toolchain с поддержкой race) — пройдено. Огов�
   `ErrCleanupUnverified` → `Quarantine` до `EndTransition`; `sd.Restart` из
   пути восстановления удалён. Fake: verb restart, verb-зависимый unitArg
   для linger, UnhangVerb. Детали — в ответе секции SDR-P1-03.
+
+  **Пятое ревью Codex от 2026-07-04:** принято без блокирующих замечаний.
+  Startup verification, stale-decision recheck и verified cleanup auto_restore
+  подтверждены кодом и regression tests. Следующий этап — пакет health
+  (SDR-P1-01 + SDR-P2-01 + SDR-P2-04 + SDR-P2-05).
 
 - **Пакет 1.3 (по третьему ревью Codex) — принят частично.**
   Появился `agent.Coordinator` — per-device transition coordinator ниже API,
