@@ -7,8 +7,10 @@ package config
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -62,6 +64,41 @@ type secretSource struct {
 	path string
 	api  bool // supplied api.token
 	mqtt bool // supplied mqtt credentials
+
+	// Identity of the ACTUALLY LOADED inode, captured via fstat on the
+	// open descriptor before reading — so the permission check cannot be
+	// bypassed by swapping the file between check and read.
+	regular bool
+	mode    os.FileMode
+	uid     int
+	uidOK   bool // owner could be determined on this platform
+}
+
+// effectiveUID is indirect so tests can simulate an owner mismatch without
+// root privileges.
+var effectiveUID = os.Geteuid
+
+// readSecretBearing opens a file that may carry secrets and returns its
+// content together with the identity of the loaded inode.
+func readSecretBearing(path string) ([]byte, secretSource, error) {
+	src := secretSource{path: path}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, src, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, src, err
+	}
+	src.regular = fi.Mode().IsRegular()
+	src.mode = fi.Mode().Perm()
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		src.uid = int(st.Uid)
+		src.uidOK = true
+	}
+	data, err := io.ReadAll(f)
+	return data, src, err
 }
 
 type NodeConfig struct {
@@ -131,7 +168,7 @@ func Load(path string) (*Config, error) {
 	cfg := defaults()
 	cfg.Path = path
 
-	data, err := os.ReadFile(path)
+	data, src, err := readSecretBearing(path)
 	switch {
 	case os.IsNotExist(err):
 		cfg.Loaded = false
@@ -149,11 +186,9 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
 	if cfg.API.Token != "" || cfg.MQTT.Password != "" || cfg.MQTT.Username != "" {
-		cfg.secretFiles = append(cfg.secretFiles, secretSource{
-			path: path,
-			api:  cfg.API.Token != "",
-			mqtt: cfg.MQTT.Password != "" || cfg.MQTT.Username != "",
-		})
+		src.api = cfg.API.Token != ""
+		src.mqtt = cfg.MQTT.Password != "" || cfg.MQTT.Username != ""
+		cfg.secretFiles = append(cfg.secretFiles, src)
 	}
 	return cfg, nil
 }
@@ -172,7 +207,7 @@ func (c *Config) SecretsPath() string {
 // model at work).
 func (c *Config) LoadSecrets() error {
 	path := c.SecretsPath()
-	data, err := os.ReadFile(path)
+	data, src, err := readSecretBearing(path)
 	switch {
 	case os.IsNotExist(err):
 		return nil
@@ -193,7 +228,6 @@ func (c *Config) LoadSecrets() error {
 		return fmt.Errorf("parse secrets %s: %w", path, err)
 	}
 
-	src := secretSource{path: path}
 	if s.API.Token != "" {
 		c.API.Token = s.API.Token
 		src.api = true
@@ -212,24 +246,36 @@ func (c *Config) LoadSecrets() error {
 	return nil
 }
 
-// CheckSecretPerms refuses group/world-readable files that supply secrets
-// the agent will actually use. A refusal, not a warning: nobody reads
-// journald warnings, and a leaked bearer token controls the SDR node
-// bypassing the sdrctl group entirely.
+// CheckSecretPerms refuses files that supply secrets the agent will
+// actually use unless they are regular files, OWNED by the agent's
+// effective user, and closed to group/world. Mode bits alone are not
+// enough: a 0600 secrets.yaml owned by a regular local user is readable
+// AND replaceable by that user — the exact sdrctl-group bypass this whole
+// mechanism exists to prevent. The identity was captured by fstat on the
+// descriptor the secrets were read from, so the verdict applies to the
+// actually loaded inode. A refusal, not a warning: nobody reads journald
+// warnings, and a leaked bearer token controls the SDR node.
 func (c *Config) CheckSecretPerms() error {
 	for _, src := range c.secretFiles {
 		inUse := (src.api && c.API.WriteEnabled) || (src.mqtt && c.MQTT.Enabled)
 		if !inUse {
 			continue
 		}
-		fi, err := os.Stat(src.path)
-		if err != nil {
-			return fmt.Errorf("stat %s: %w", src.path, err)
+		if !src.regular {
+			return fmt.Errorf("%s carries active secrets but is not a regular file", src.path)
 		}
-		if fi.Mode().Perm()&0o077 != 0 {
+		if !src.uidOK {
+			return fmt.Errorf("%s carries active secrets but its owner could not be determined on this platform", src.path)
+		}
+		if src.uid != effectiveUID() {
+			return fmt.Errorf(
+				"%s carries active secrets but is owned by uid %d, not the agent user (uid %d) — that user can read AND replace them; chown it to the agent user",
+				src.path, src.uid, effectiveUID())
+		}
+		if src.mode&0o077 != 0 {
 			return fmt.Errorf(
 				"%s carries active secrets but is readable beyond its owner (%04o); move them to %s with mode 0600 (install -m 0600) or tighten the file",
-				src.path, fi.Mode().Perm(), c.SecretsPath())
+				src.path, src.mode, c.SecretsPath())
 		}
 	}
 	return nil

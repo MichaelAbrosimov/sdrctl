@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -192,6 +193,44 @@ services:
 	}
 	if err := cfg2.CheckSecretPerms(); err == nil {
 		t.Error("group-readable secrets file with write API enabled was accepted")
+	}
+}
+
+// Pack-3 review item 1: safe mode bits are NOT enough — a 0600 secrets
+// file owned by the wrong user can be read and replaced by that user. The
+// expected owner is the agent's effective UID (root under systemd);
+// simulated here via the effectiveUID indirection, since a non-root test
+// cannot chown to another user.
+func TestCheckSecretPermsWrongOwner(t *testing.T) {
+	cfgPath := writeConfig(t, `
+api:
+  write_enabled: true
+services:
+  rtl-tcp:
+    systemd: rtl-tcp.service
+`)
+	secrets := filepath.Join(filepath.Dir(cfgPath), "secrets.yaml")
+	if err := os.WriteFile(secrets, []byte("api:\n  token: sekret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.LoadSecrets(); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := effectiveUID
+	effectiveUID = func() int { return orig() + 1 } // pretend the agent runs as someone else
+	defer func() { effectiveUID = orig }()
+
+	err = cfg.CheckSecretPerms()
+	if err == nil {
+		t.Fatal("0600 secrets file owned by a different user was accepted")
+	}
+	if !strings.Contains(err.Error(), "owned by uid") {
+		t.Errorf("refusal should explain the owner mismatch, got: %v", err)
 	}
 }
 
