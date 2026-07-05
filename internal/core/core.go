@@ -183,20 +183,28 @@ func buildDevice(ctx context.Context, dc config.DeviceConfig, sd *systemd.Client
 	return ds
 }
 
+// modeFrom folds unit observations into one mode. Priority: a confirmed
+// conflict (two known owners) is the loudest; then unknown — one KNOWN
+// running mode must not mask a competitor whose state could not be read,
+// or SetMode would confirm success without proof; a single known name wins
+// only when every other unit was read successfully.
 func modeFrom(names []string, anyUnknown bool) string {
 	switch {
-	case len(names) == 1:
-		return names[0]
 	case len(names) > 1:
 		return ModeConflict
 	case anyUnknown:
 		return ModeUnknown
+	case len(names) == 1:
+		return names[0]
 	default:
 		return ModeIdle
 	}
 }
 
 // HealthFor derives device health from mode, desired mode and presence.
+// Unknown presence (sysfs unobservable) makes the device unknown: health
+// claims need proof of the dongle, and "could not look" is not proof —
+// only a confirmed conflict outranks it.
 func HealthFor(d DeviceStatus) string {
 	if d.Mode == ModeConflict || d.DesiredMode == ModeConflict {
 		return HealthConflict
@@ -204,7 +212,10 @@ func HealthFor(d DeviceStatus) string {
 	if d.Mode == ModeUnknown || d.DesiredMode == ModeUnknown {
 		return HealthUnknown
 	}
-	if d.PresenceKnown && !d.Present {
+	if !d.PresenceKnown {
+		return HealthUnknown
+	}
+	if !d.Present {
 		return HealthMissing
 	}
 	switch {

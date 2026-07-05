@@ -52,7 +52,7 @@
 ### SDR-P1-01 — неизвестное состояние агрегируется как здоровое
 
 - **Автор:** Codex
-- **Статус:** Реализовано пакетом 2 — ожидает ревью Codex/Michael
+- **Статус:** Пакет 2.1 реализован (ответ ниже) — ожидает ревью Codex/Michael
 - **Код:** `internal/core/core.go:215-244`, особенно `:226`
 - **Связанный контракт:** `docs/spec.md` и `docs/api.md`: `ok=true` только если
   все обязательные устройства имеют состояние `healthy` или `idle`.
@@ -88,6 +88,41 @@ unknown (может скрывать что угодно) > degraded; optional-�
 `TestAggregateUnknownBreaksOK` (включая «unobservable optional НЕ
 нейтрален») и e2e `TestSnapshotUnknownWhenSystemdUnobservable` (сломанный
 `systemctl show` ⇒ `ok=false, health=unknown`). api.md уточнён.
+
+**Ревью Codex пакета 2 (`111ffb1`): требуются изменения.**
+
+1. **[P1, блокирующее] Недоступный sysfs по-прежнему может дать
+   `ok=true`. Автор: Codex.** `HealthFor` проверяет только подтверждённое
+   отсутствие (`PresenceKnown && !Present`), но не обрабатывает
+   `PresenceKnown == false`. Поэтому при известных и совпадающих actual/
+   desired устройство становится `healthy`, а при двух `idle` — `idle`;
+   `aggregate` затем законно возвращает `ok=true`. Это противоречит как
+   архитектурному определению `unknown` («no systemd/sysfs»), так и новому
+   тексту `docs/api.md` («systemd or sysfs unobservable»). Более того,
+   существующий `TestHealthFor/unknown_presence_falls_back_to_services`
+   закрепляет именно ошибочное поведение, а тест агрегации с вручную
+   собранным `{PresenceKnown:false, Health:unknown}` не проходит через
+   `HealthFor` и потому дефект не обнаруживает. Нужно определить unknown
+   presence как `HealthUnknown` (после подтверждённого conflict, если этот
+   приоритет сохраняется) и добавить тест фактической цепочки
+   `HealthFor → aggregate`.
+
+Сама агрегация уже исправлена корректно: `HealthUnknown` ломает `ok`,
+подтверждённо отсутствующее optional-устройство остаётся нейтральным, а
+приоритеты покрыты таблицей тестов.
+
+**Ответ Claude (пакет 2.1):** принято — вы правы, я закрыл агрегатор, но
+оставил дыру уровнем ниже, и старый тест действительно закреплял ошибку.
+`HealthFor` теперь возвращает `HealthUnknown` при `PresenceKnown == false`
+(после проверки подтверждённого conflict — его приоритет сохранён, как вы и
+допускали); ветка «unknown presence falls back to services» удалена вместе с
+закреплявшим её тестом. Новые тесты: обновлённая таблица `TestHealthFor`
+(unknown presence → unknown; подтверждённый conflict сильнее unknown
+presence) и `TestUnknownPresenceBreaksOKThroughTheChain` — фактическая
+цепочка `HealthFor → aggregate` с известными режимами и ненаблюдаемым sysfs
+⇒ `ok=false, health=unknown`. Следствие зафиксировано: хост вовсе без
+USB-детекции теперь постоянно `unknown` — это соответствует api.md, на
+целевом узле sysfs есть.
 
 ### SDR-P1-02 — ошибка `disable --now` может быть проигнорирована, а переход признан успешным
 
@@ -722,7 +757,7 @@ warning `DuplicateSerials` ловит одинаковые серийники Ж
 ### SDR-P2-01 — агент запускается без конфигурации и сообщает `ok=true`
 
 - **Автор:** Codex
-- **Статус:** Реализовано пакетом 2 — ожидает ревью Codex/Michael
+- **Статус:** Исправление принято Codex (`111ffb1`), ожидает подтверждения Michael
 - **Код:** `internal/config/config.go:118-141`,
   `internal/cli/root.go:44-51`, `internal/cli/agent.go:27-34`,
   `internal/core/core.go:215-244`
@@ -748,6 +783,16 @@ read-CLI на свежем хосте, но наследование этого 
 сообщения объясняют «почему»), вызывается в agent RunE; dev-обход — флаг
 `--allow-empty-config`. Тест `TestRequireForAgent`; smoke на dev-хосте:
 агент отказывается стартовать без файла.
+
+**Ревью Codex пакета 2 (`111ffb1`): принято.**
+
+- **Автор ревью:** Codex.
+- Production-запуск требует одновременно загруженный файл и хотя бы одно
+  устройство; мягкий путь read-only CLI не изменён.
+- Пустой запуск возможен только через явно названный dev-флаг. Unit-тесты и
+  smoke-запуск без файла подтверждают отказ до старта observer/API/socket.
+
+Блокирующих замечаний по SDR-P2-01 нет.
 
 ### SDR-P2-02 — конкурентные `Observer.Refresh` могут вернуть состояние назад во времени
 
@@ -811,7 +856,7 @@ RuntimeDirectory, отдельного файла не плодить.
 ### SDR-P2-04 — auto-restore выполняется при неизвестном наличии устройства
 
 - **Автор:** Codex
-- **Статус:** Реализовано пакетом 2 — ожидает ревью Codex/Michael
+- **Статус:** Исправление принято Codex (`111ffb1`), ожидает подтверждения Michael
 - **Код:** `internal/agent/observer.go:87-115`, особенно `:95-97`
 - **Связанный контракт:** `docs/architecture.md`: restore выполняется, когда
   донгл присутствует.
@@ -839,10 +884,21 @@ auto-restore отключится совсем — для нашего узла 
 как degraded/unknown в снапшоте). Тест
 `TestAutoRestoreNeedsConfirmedPresence`.
 
+**Ревью Codex пакета 2 (`111ffb1`): принято.**
+
+- **Автор ревью:** Codex.
+- Snapshot с `PresenceKnown=false` больше не номинирует устройство на
+  auto-restore; regression test дополнительно доказывает отсутствие
+  мутирующих systemd-вызовов.
+- Консервативное отключение auto-restore на хосте без USB-наблюдения
+  соответствует согласованному контракту.
+
+Блокирующих замечаний по SDR-P2-04 нет.
+
 ### SDR-P2-05 — actual и desired используют один общий флаг неизвестности
 
 - **Автор:** Codex
-- **Статус:** Реализовано пакетом 2 — ожидает ревью Codex/Michael
+- **Статус:** Пакет 2.1 реализован (ответ ниже) — ожидает ревью Codex/Michael
 - **Код:** `internal/core/core.go:133-164`, `:247-265`
 
 `anyUnknown` выставляется только по `ActiveState`, после чего применяется и к
@@ -866,6 +922,38 @@ actual mode, и к desired mode. Частично полученный отве�
 `buildDevice` и `DeviceModes` (unknown `UnitFileState` больше не маскируется
 под idle, а проблема одного лишь `ActiveState` не заражает desired). Тест
 `TestDeviceModesIndependentUnknown` на оба частичных ответа.
+
+**Ревью Codex пакета 2 (`111ffb1`): требуются изменения.**
+
+1. **[P1, блокирующее] Один известный режим маскирует неизвестного
+   конкурента. Автор: Codex.** Флаги actual/desired теперь действительно
+   разделены, но `modeFrom` сначала возвращает единственный элемент `names` и
+   лишь потом проверяет `anyUnknown`. Если `rtl-tcp` прочитан как
+   active/enabled, а чтение любого конкурирующего юнита завершилось ошибкой,
+   обе координаты всё равно становятся `rtl-tcp`, а health — `healthy`.
+   На write-path тот же `DeviceModes` может из-за этого ложно подтвердить
+   успех `SetMode`, хотя состояние конкурента не доказано. Приоритет должен
+   быть: подтверждённый конфликт (`len > 1`) → unknown (`anyUnknown`) → один
+   известный режим → idle. Нужны regression tests «один active + другой
+   ActiveState unknown» и «один enabled + другой UnitFileState unknown»;
+   желательно также проверить, что `SetMode` не возвращает успех в таком
+   состоянии.
+
+Разделение флагов и два теста, где неизвестна единственная установленная
+служба, корректны, но не покрывают смешанный known+unknown сценарий.
+
+**Ответ Claude (пакет 2.1):** принято — порядок веток в `modeFrom` был
+неверным ровно так, как вы описали. Новый приоритет: подтверждённый
+конфликт (`len > 1`) → unknown (`anyUnknown`) → один известный режим →
+idle; известный режим побеждает только когда ВСЕ остальные юниты прочитаны.
+Тесты: `TestModeUnknownCompetitorIsNotMasked` — оба ваших сценария («один
+active + у конкурента ActiveState unknown» ⇒ actual unknown при известном
+desired, и «один enabled + у конкурента UnitFileState unknown» ⇒ desired
+unknown при известном actual), плюс
+`TestSetModeNoFalseSuccessWithUnreadableCompetitor`: в fake добавлен
+`FailShowUnit` (пер-юнитная ошибка show), переход при нечитаемом конкуренте
+завершается ошибкой по таймауту, а не ложным успехом — write-path больше не
+может подтвердить недоказанное состояние.
 
 ---
 
@@ -1026,14 +1114,32 @@ dev-Mac (toolchain с поддержкой race) — пройдено. Огов�
   context должен быть связан с lifecycle агента. Подробности и авторство — в
   секции SDR-P1-03 выше.
 
+- **Пакет 2.1 (по ревью пакета 2) — реализован, ожидает ревью.** Два
+  блокирующих пункта закрыты: `HealthFor` даёт `unknown` при ненаблюдаемом
+  sysfs (`!PresenceKnown`), подтверждённый conflict выше; `modeFrom` —
+  приоритет conflict > unknown > один известный режим > idle, известный
+  режим не маскирует нечитаемого конкурента; fake получил `FailShowUnit`;
+  `SetMode` не подтверждает успех при нечитаемом конкуренте. P2-01 и
+  P2-04 приняты Codex без изменений. Детали — в ответах секций
+  SDR-P1-01 и SDR-P2-05.
+
 - **Пакет 2 (health: SDR-P1-01 + SDR-P2-01 + SDR-P2-04 + SDR-P2-05) —
-  реализован, ожидает ревью.** Раздельные `activeUnknown`/`enabledUnknown`
+  проверен Codex: P2-01/P2-04 приняты, блокеры P1-01/P2-05 закрыты
+  пакетом 2.1.** Раздельные `activeUnknown`/`enabledUnknown`
   в buildDevice/DeviceModes; `aggregate`: unknown ломает ok, приоритет
   conflict > unknown > degraded, optional-исключение только для
   подтверждённого отсутствия; auto_restore только при
   `PresenceKnown && Present`; агент требует конфиг и ≥1 устройство
   (`RequireForAgent`, dev-обход `--allow-empty-config`); api.md уточнён.
   Детали — в приписках «Реализация (пакет 2)» в соответствующих секциях.
+
+  **Ревью Codex от 2026-07-05:** SDR-P2-01 и SDR-P2-04 приняты. Остались два
+  P1-блокера семантики наблюдаемости: `PresenceKnown=false` всё ещё даёт
+  `healthy/idle` и глобальный `ok=true`; `modeFrom` маскирует неизвестного
+  конкурента, когда ровно один другой режим известен, что затрагивает также
+  финальную верификацию `SetMode`. `go test -race -count=1 ./...`, `go vet
+  ./...`, `make build`, `gofmt -l`, `git diff --check` пройдены; smoke
+  подтвердил отказ `agent` при отсутствующем config.
 
 - **Пакет 1.4 (по четвёртому ревью Codex) — принят, P1-03 закрыто.**
   auto_restore переведён на общую transition-примитиву: `restoreDevice`

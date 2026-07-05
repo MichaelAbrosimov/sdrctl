@@ -52,6 +52,7 @@ type Fake struct {
 	hang          map[string]bool
 	linger        map[string]bool
 	stickyEnabled map[string]bool
+	failShow      map[string]error
 	keepOnCancel  bool
 	jobs          []pendingJob
 	nextJobID     int
@@ -64,8 +65,18 @@ func New(units map[string]*Unit) *Fake {
 		hang:          map[string]bool{},
 		linger:        map[string]bool{},
 		stickyEnabled: map[string]bool{},
+		failShow:      map[string]error{},
 		nextJobID:     1,
 	}
+}
+
+// FailShowUnit makes `systemctl show` of ONE unit fail while other units
+// stay readable — the mixed known+unknown scenario a single-mode read must
+// not mask.
+func (f *Fake) FailShowUnit(unit string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failShow[unit] = err
 }
 
 // Client wraps the fake into a systemd.Client.
@@ -204,6 +215,9 @@ func (f *Fake) run(ctx context.Context, name string, args ...string) (string, er
 	defer f.mu.Unlock()
 	switch verb {
 	case "show":
+		if err := f.failShow[args[1]]; err != nil {
+			return "", err
+		}
 		u := f.units[args[1]]
 		if u == nil {
 			u = &Unit{Load: "not-found"}

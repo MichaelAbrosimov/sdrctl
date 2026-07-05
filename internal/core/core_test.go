@@ -136,6 +136,56 @@ func TestAggregateUnknownBreaksOK(t *testing.T) {
 	}
 }
 
+// SDR-P1-01 (pack 2 review): the ACTUAL chain HealthFor → aggregate — an
+// unobservable-sysfs device with perfectly known modes must break ok.
+func TestUnknownPresenceBreaksOKThroughTheChain(t *testing.T) {
+	d := DeviceStatus{PresenceKnown: false, Mode: "rtl-tcp", DesiredMode: "rtl-tcp"}
+	d.Health = HealthFor(d)
+	ok, health := aggregate([]DeviceStatus{d})
+	if ok || health != HealthUnknown {
+		t.Errorf("unknown presence produced ok=%v health=%s; want false/unknown", ok, health)
+	}
+}
+
+// SDR-P2-05 (pack 2 review): one KNOWN mode must not mask a competitor
+// whose state could not be read — unknown outranks a single known name.
+func TestModeUnknownCompetitorIsNotMasked(t *testing.T) {
+	// Competitor's ActiveState unknown, its enabled state known.
+	f := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "active", Enabled: "enabled"},
+		"rtl-433.service": {Load: "loaded", Active: "unknown", Enabled: "disabled"},
+	})
+	actual, desired := DeviceModes(context.Background(), f.Client(), testDevice())
+	if actual != ModeUnknown || desired != "rtl-tcp" {
+		t.Errorf("unknown competitor ActiveState: got actual=%s desired=%s, want unknown/rtl-tcp", actual, desired)
+	}
+
+	// Competitor's UnitFileState unknown, its active state known.
+	f2 := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "active", Enabled: "enabled"},
+		"rtl-433.service": {Load: "loaded", Active: "inactive", Enabled: "unknown"},
+	})
+	actual, desired = DeviceModes(context.Background(), f2.Client(), testDevice())
+	if actual != "rtl-tcp" || desired != ModeUnknown {
+		t.Errorf("unknown competitor UnitFileState: got actual=%s desired=%s, want rtl-tcp/unknown", actual, desired)
+	}
+}
+
+// SDR-P2-05 (pack 2 review): SetMode must not confirm success while a
+// competitor's state cannot be read — the desired coordinate is unproven.
+func TestSetModeNoFalseSuccessWithUnreadableCompetitor(t *testing.T) {
+	f := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "inactive", Enabled: "disabled"},
+		"rtl-433.service": {Load: "loaded", Active: "inactive", Enabled: "disabled"},
+	})
+	f.FailShowUnit("rtl-433.service", errors.New("dbus timeout for this unit"))
+
+	_, err := SetMode(context.Background(), f.Client(), testDevice(), "rtl-tcp", 700*time.Millisecond)
+	if err == nil {
+		t.Fatal("SetMode reported success while the competitor's state was unreadable")
+	}
+}
+
 // SDR-P1-01 end to end: with systemd unobservable the snapshot must say so
 // instead of reporting a healthy idle node to the orchestrator.
 func TestSnapshotUnknownWhenSystemdUnobservable(t *testing.T) {
@@ -162,7 +212,10 @@ func TestHealthFor(t *testing.T) {
 		{"missing", DeviceStatus{PresenceKnown: true, Present: false, Mode: ModeIdle, DesiredMode: ModeIdle}, HealthMissing},
 		{"degraded", DeviceStatus{PresenceKnown: true, Present: true, Mode: ModeIdle, DesiredMode: "rtl-tcp"}, HealthDegraded},
 		{"conflict", DeviceStatus{PresenceKnown: true, Present: true, Mode: ModeConflict, DesiredMode: "rtl-tcp"}, HealthConflict},
-		{"unknown presence falls back to services", DeviceStatus{PresenceKnown: false, Mode: "rtl-tcp", DesiredMode: "rtl-tcp"}, HealthHealthy},
+		// SDR-P1-01 (pack 2 review): unobservable sysfs is not proof of
+		// anything — unknown presence means unknown health, never healthy.
+		{"unknown presence is unknown health", DeviceStatus{PresenceKnown: false, Mode: "rtl-tcp", DesiredMode: "rtl-tcp"}, HealthUnknown},
+		{"confirmed conflict outranks unknown presence", DeviceStatus{PresenceKnown: false, Mode: ModeConflict, DesiredMode: "rtl-tcp"}, HealthConflict},
 	}
 	for _, tc := range cases {
 		if got := HealthFor(tc.d); got != tc.want {
