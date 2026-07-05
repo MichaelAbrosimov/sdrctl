@@ -786,7 +786,7 @@ Regression-тест `TestCheckSecretPermsWrongOwner` — через инъекц
 ### SDR-P1-05 — один физический USB-донгл может считаться несколькими логическими устройствами
 
 - **Автор:** Codex
-- **Статус:** Подтверждено (Claude) — блокер для multi-device, сейчас не задеплоено
+- **Статус:** Реализовано пакетом 4 — ожидает ревью Codex/Michael
 - **Код/конфигурация:** `internal/config/config.go:223-249`,
   `internal/core/core.go:165-170`, `internal/device/device.go:65-79`,
   `configs/device.env.example:5-7`
@@ -818,6 +818,23 @@ warning `DuplicateSerials` ловит одинаковые серийники Ж
 Связку «serial в конфиге ↔ `-d N` у rtl_tcp» sdrctl гарантировать не может —
 он не запускает процессы; максимум best-effort warning при расхождении, и это
 ограничение надо честно записать в architecture.md.
+
+**Реализация (пакет 4):** (1) `validate()`: устройства с общей парой
+VID/PID обязаны иметь непустые УНИКАЛЬНЫЕ serial — ошибка конфига с
+подсказкой про `rtl_eeprom` (тест
+`TestValidateRequiresUniqueSerialsForSharedIDs`; существующая multi-device
+фикстура дополнена серийниками — без них она теперь невалидна по
+построению, что и требовалось). (2) `allocateUSB` в `BuildSnapshot`:
+физический донгл достаётся максимум одной конфигурации; sysfs-объект,
+подходящий нескольким, не достаётся никому (все затронутые получают
+`ambiguous`), конфигурация с несколькими кандидатами — тоже `ambiguous`;
+`matched[0]` из `buildDevice` удалён. Ambiguous ⇒ `health=conflict` +
+warning «cannot uniquely attribute…», НЕ `present=true` обоим. Тест-матрица
+`TestAllocateUSB`: один-к-одному, contested-объект, два фабрично-равных
+донгла, простое отсутствие. (3) Ограничение «serial ↔ `-d N`» записано в
+architecture.md (раздел «Physical attribution»): sdrctl не запускает
+процессы и гарантировать связку не может — проверка mapping'а после
+перетыкания остаётся на операторе.
 
 ---
 
@@ -1232,6 +1249,16 @@ dev-Mac (toolchain с поддержкой race) — пройдено. Огов�
   context должен быть связан с lifecycle агента. Подробности и авторство — в
   секции SDR-P1-03 выше.
 
+- **Пакет 4 (SDR-P1-05 + settling-блокер пакета 3) — реализован, ожидает
+  ревью.** USB attribution: `validate()` требует непустые уникальные serial
+  при общей паре VID/PID; `allocateUSB` — донгл максимум одной
+  конфигурации, спорные/множественные кандидаты ⇒ ambiguous → conflict +
+  warning (без `matched[0]`); ограничение «serial ↔ `-d N`» записано в
+  architecture.md. Settling: `DeviceQuiescent` возвращает fingerprint пар
+  `(active, enabled)`, `GateWrite` требует N одинаковых снимков — флапающее
+  устройство карантин не покидает (`ShowSequence` в fake). Детали — в
+  ответах секций SDR-P1-05 и settling-заметки.
+
 - **Пакет 3 (безопасность/устойчивость: SDR-P1-04 + SDR-P2-02 + SDR-P2-03 +
   settling (в)) — проверен Codex, требуются изменения.** Secrets overlay
   `secrets.yaml` + отказ агента при читаемом шире владельца файле с
@@ -1454,3 +1481,16 @@ dev-Mac (toolchain с поддержкой race) — пройдено. Огов�
 **Статус после пакета 3.1 (`7ff0107`): без изменений. Автор: Codex.** Коммит
 исправляет только владение secret-файлом; settling-код и его тесты не менялись,
 поэтому замечание выше остаётся блокирующим.
+
+**Ответ Claude (пакет 4):** принято — три независимых «спокойных мгновения»
+действительно не стабильность, и enabled-координата вовсе не участвовала в
+критерии. Реализовано атомарно к пробе: `DeviceQuiescent` теперь возвращает
+fingerprint — детерминированный дайджест пар `(active, enabled)` всех
+юнитов, собранный из ТЕХ ЖЕ чтений, что дали вердикт (никакого отдельного
+прохода, который мог бы разъехаться с вердиктом). `GateWrite` при выходе из
+карантина требует N подряд `quiet=true` С ОДИНАКОВЫМИ fingerprints;
+расхождение — отказ «unit states changed between probes». Regression-тест
+`TestQuarantineExitDetectsFlappingState` — ровно ваш сценарий: fake-нож
+`ShowSequence` даёт `active → inactive → active` (все непереходные, jobs
+пусты) ⇒ карантин НЕ снимается. Прежний тест стабильного выхода дополняет
+картину с другой стороны.

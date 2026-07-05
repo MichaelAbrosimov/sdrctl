@@ -162,12 +162,16 @@ func (c *Coordinator) GateWrite(ctx context.Context, sd *systemd.Client, dev *co
 
 	// First-write verification takes one read; leaving quarantine takes N
 	// consecutive stable ones — the device got there by being ambiguous.
+	// Stability means IDENTICAL (active, enabled) fingerprints across the
+	// probes, not merely N independent quiescent-looking instants: a unit
+	// flapping between two calm states is not settled.
 	confirmations := 1
 	if quarantined {
 		confirmations = quiescenceConfirmations
 	}
 	quiet := false
 	var err error
+	var baseline string
 	for i := 0; i < confirmations; i++ {
 		if i > 0 {
 			select {
@@ -179,7 +183,15 @@ func (c *Coordinator) GateWrite(ctx context.Context, sd *systemd.Client, dev *co
 				break
 			}
 		}
-		if quiet, err = core.DeviceQuiescent(ctx, sd, dev); err != nil || !quiet {
+		var fp string
+		if quiet, fp, err = core.DeviceQuiescent(ctx, sd, dev); err != nil || !quiet {
+			break
+		}
+		if i == 0 {
+			baseline = fp
+		} else if fp != baseline {
+			quiet = false
+			err = fmt.Errorf("unit states changed between probes")
 			break
 		}
 	}
@@ -222,7 +234,7 @@ func (c *Coordinator) VerifyQuiescent(ctx context.Context, sd *systemd.Client, d
 	if verified {
 		return nil
 	}
-	quiet, err := core.DeviceQuiescent(ctx, sd, dev)
+	quiet, _, err := core.DeviceQuiescent(ctx, sd, dev)
 	if err != nil {
 		return fmt.Errorf("device %s cannot be verified quiescent: %w", dev.ID, err)
 	}

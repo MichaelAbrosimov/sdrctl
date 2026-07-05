@@ -3,11 +3,13 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/MichaelAbrosimov/sdrctl/internal/config"
+	"github.com/MichaelAbrosimov/sdrctl/internal/device"
 	"github.com/MichaelAbrosimov/sdrctl/internal/systemd/systemdtest"
 )
 
@@ -183,6 +185,52 @@ func TestSetModeNoFalseSuccessWithUnreadableCompetitor(t *testing.T) {
 	_, err := SetMode(context.Background(), f.Client(), testDevice(), "rtl-tcp", 700*time.Millisecond)
 	if err == nil {
 		t.Fatal("SetMode reported success while the competitor's state was unreadable")
+	}
+}
+
+// SDR-P1-05: a physical dongle satisfies AT MOST one configuration; every
+// unresolvable attribution is an explicit ambiguity, never a guess.
+func TestAllocateUSB(t *testing.T) {
+	devA := config.DeviceConfig{ID: "a", USBVendorID: "0bda", USBProductID: "2838", Serial: "S1"}
+	devB := config.DeviceConfig{ID: "b", USBVendorID: "0bda", USBProductID: "2838", Serial: "S2"}
+	usb := func(serials ...string) []device.USBDevice {
+		var out []device.USBDevice
+		for i, s := range serials {
+			out = append(out, device.USBDevice{
+				SysName: fmt.Sprintf("1-%d", i+1), VendorID: "0bda", ProductID: "2838", Serial: s,
+			})
+		}
+		return out
+	}
+
+	// Unique serials → clean one-to-one attribution.
+	claims := allocateUSB([]config.DeviceConfig{devA, devB}, usb("S1", "S2"))
+	if claims[0].dev == nil || claims[0].dev.Serial != "S1" ||
+		claims[1].dev == nil || claims[1].dev.Serial != "S2" {
+		t.Errorf("unique serials not attributed one-to-one: %+v", claims)
+	}
+
+	// One sysfs object matches BOTH configurations (equal serials in
+	// config would be rejected by validate; here both match via one
+	// physical dongle carrying S1 while dev b has empty serial).
+	devBAny := devB
+	devBAny.Serial = ""
+	claims = allocateUSB([]config.DeviceConfig{devA, devBAny}, usb("S1"))
+	if claims[0].dev != nil || !claims[0].ambiguous || claims[1].dev != nil || !claims[1].ambiguous {
+		t.Errorf("contested dongle was granted instead of flagged: %+v", claims)
+	}
+
+	// One configuration, two matching dongles (factory-equal serials) →
+	// ambiguous, not matched[0].
+	claims = allocateUSB([]config.DeviceConfig{devA}, usb("S1", "S1"))
+	if claims[0].dev != nil || !claims[0].ambiguous {
+		t.Errorf("duplicate physical serials resolved by guessing: %+v", claims)
+	}
+
+	// No candidates at all → plain absence, not ambiguity.
+	claims = allocateUSB([]config.DeviceConfig{devA}, usb("S9"))
+	if claims[0].dev != nil || claims[0].ambiguous {
+		t.Errorf("absence misreported: %+v", claims)
 	}
 }
 
@@ -468,7 +516,7 @@ func TestDeviceQuiescent(t *testing.T) {
 	f.LingerJob("enable")
 	f.KeepJobsOnCancel()
 	_, _ = SetMode(context.Background(), f.Client(), testDevice(), "rtl-tcp", 500*time.Millisecond)
-	if quiet, err := DeviceQuiescent(context.Background(), f.Client(), testDevice()); err != nil || quiet {
+	if quiet, _, err := DeviceQuiescent(context.Background(), f.Client(), testDevice()); err != nil || quiet {
 		t.Errorf("device with a pending job reported quiescent=%v err=%v", quiet, err)
 	}
 
@@ -476,7 +524,7 @@ func TestDeviceQuiescent(t *testing.T) {
 	f2 := systemdtest.New(map[string]*systemdtest.Unit{
 		"rtl-tcp.service": {Load: "loaded", Active: "activating", Enabled: "enabled"},
 	})
-	if quiet, err := DeviceQuiescent(context.Background(), f2.Client(), testDevice()); err != nil || quiet {
+	if quiet, _, err := DeviceQuiescent(context.Background(), f2.Client(), testDevice()); err != nil || quiet {
 		t.Errorf("activating unit reported quiescent=%v err=%v", quiet, err)
 	}
 
@@ -484,7 +532,7 @@ func TestDeviceQuiescent(t *testing.T) {
 	f3 := systemdtest.New(map[string]*systemdtest.Unit{
 		"rtl-tcp.service": {Load: "loaded", Active: "active", Enabled: "enabled"},
 	})
-	if quiet, err := DeviceQuiescent(context.Background(), f3.Client(), testDevice()); err != nil || !quiet {
+	if quiet, _, err := DeviceQuiescent(context.Background(), f3.Client(), testDevice()); err != nil || !quiet {
 		t.Errorf("settled device reported quiescent=%v err=%v", quiet, err)
 	}
 
@@ -493,7 +541,7 @@ func TestDeviceQuiescent(t *testing.T) {
 		"rtl-tcp.service": {Load: "loaded", Active: "inactive", Enabled: "disabled"},
 	})
 	f4.FailVerb("list-jobs", errors.New("dbus is down"))
-	if _, err := DeviceQuiescent(context.Background(), f4.Client(), testDevice()); err == nil {
+	if _, _, err := DeviceQuiescent(context.Background(), f4.Client(), testDevice()); err == nil {
 		t.Error("unobservable state must be an error, not a verdict")
 	}
 }

@@ -75,7 +75,27 @@ unknown   cannot determine (no systemd/sysfs on this host)
 ```
 
 Global: `ok = true` iff all required devices are healthy or idle. Devices
-marked `optional: true` never break global health while absent.
+marked `optional: true` never break global health while their absence is
+CONFIRMED; an unobservable device (no systemd/sysfs answer) is `unknown`
+and breaks `ok` — "cannot observe" is never reported as "fine".
+
+### Physical attribution (multi-device)
+
+A physical dongle satisfies AT MOST one device configuration. Devices
+sharing a VID/PID pair must therefore carry non-empty unique serials
+(enforced by config validation; assign with `rtl_eeprom`). When attribution
+is still unresolvable at runtime — one sysfs object matches two
+configurations, or two factory-equal dongles match one — the affected
+devices report `conflict` with an explaining warning instead of a guess:
+presence built on a guess would quietly control the wrong dongle.
+
+Known limitation: sdrctl matches dongles by USB serial, while `rtl_tcp`
+selects them by librtlsdr index (`-d N` in the per-device env file). sdrctl
+does not launch those processes and CANNOT guarantee the two identities
+agree — after replugging or adding dongles, verify the mapping with
+`sdrctl device <id>` against the actual port behaviour. Index drift is the
+operator's to check; unique serials keep at least the control-plane side
+honest.
 
 ## The observer (deliberately not a supervisor)
 

@@ -207,6 +207,31 @@ func TestQuarantineExitRequiresStableQuiescence(t *testing.T) {
 	}
 }
 
+// Pack-3 review settling blocker: N quiescent-looking instants are not
+// stability — the (active, enabled) fingerprints must be IDENTICAL across
+// the probes. A unit flapping between calm states must not leave
+// quarantine.
+func TestQuarantineExitDetectsFlappingState(t *testing.T) {
+	f := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "active", Enabled: "enabled"},
+	})
+	// Non-transitional on every probe, but not the SAME state twice.
+	f.ShowSequence("rtl-tcp.service", "active", "inactive", "active")
+
+	c := NewCoordinator()
+	dev := &coordTestConfig().Devices[0]
+	c.Quarantine(dev.ID)
+
+	err := c.GateWrite(context.Background(), f.Client(), dev, time.Hour)
+	if err == nil {
+		t.Fatal("flapping device left quarantine")
+	}
+	if !strings.Contains(err.Error(), "changed between probes") &&
+		!strings.Contains(err.Error(), "quarantined") {
+		t.Errorf("refusal should explain the instability, got: %v", err)
+	}
+}
+
 // SDR-P2-04: a control action needs POSITIVE evidence of the dongle — a
 // failed sysfs read (presence unknown) must not trigger a restore.
 func TestAutoRestoreNeedsConfirmedPresence(t *testing.T) {

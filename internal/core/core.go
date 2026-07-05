@@ -89,11 +89,18 @@ func BuildSnapshot(ctx context.Context, cfg *config.Config, sd *systemd.Client) 
 
 	usb, usbErr := device.ScanUSB()
 	presenceKnown := usbErr == nil
+	claims := allocateUSB(cfg.Devices, usb)
 
 	seenIDPairs := map[string]bool{}
-	for _, dc := range cfg.Devices {
-		ds := buildDevice(ctx, dc, sd, usb, presenceKnown)
+	for i, dc := range cfg.Devices {
+		ds := buildDevice(ctx, dc, sd, claims[i], presenceKnown)
 		snap.Devices = append(snap.Devices, ds)
+
+		if presenceKnown && claims[i].ambiguous {
+			snap.Warnings = append(snap.Warnings, fmt.Sprintf(
+				"device %s: cannot uniquely attribute a USB dongle (shared or duplicate serials) — refusing to guess; assign unique serials with rtl_eeprom",
+				ds.ID))
+		}
 
 		if ds.Mode != ModeIdle && ds.Mode != ModeConflict && ds.Mode != ModeUnknown &&
 			ds.DesiredMode == ModeIdle {
@@ -119,7 +126,52 @@ func BuildSnapshot(ctx context.Context, cfg *config.Config, sd *systemd.Client) 
 	return snap
 }
 
-func buildDevice(ctx context.Context, dc config.DeviceConfig, sd *systemd.Client, usb []device.USBDevice, presenceKnown bool) DeviceStatus {
+// usbClaim is the outcome of attributing physical dongles to one device
+// configuration: exactly one owned sysfs object, nothing, or an explicit
+// ambiguity that must not be silently resolved by guessing.
+type usbClaim struct {
+	dev       *device.USBDevice
+	ambiguous bool
+}
+
+// allocateUSB attributes sysfs devices to configurations under one rule: a
+// physical dongle may satisfy AT MOST one configuration. An object matching
+// several configurations is granted to none of them (all get ambiguous),
+// and a configuration matching several objects is ambiguous too — presence
+// built on a guess would quietly control the wrong dongle (SDR-P1-05).
+func allocateUSB(devs []config.DeviceConfig, usb []device.USBDevice) []usbClaim {
+	candidates := make([][]device.USBDevice, len(devs))
+	wantedBy := map[string]int{} // sysfs name → how many configurations match it
+	for i, dc := range devs {
+		candidates[i] = device.Match(usb, dc.USBVendorID, dc.USBProductID, dc.Serial)
+		for _, u := range candidates[i] {
+			wantedBy[u.SysName]++
+		}
+	}
+
+	claims := make([]usbClaim, len(devs))
+	for i := range devs {
+		var sole []device.USBDevice
+		contested := false
+		for _, u := range candidates[i] {
+			if wantedBy[u.SysName] > 1 {
+				contested = true
+				continue
+			}
+			sole = append(sole, u)
+		}
+		switch {
+		case len(sole) == 1 && !contested:
+			u := sole[0]
+			claims[i] = usbClaim{dev: &u}
+		case len(sole) > 1 || contested:
+			claims[i] = usbClaim{ambiguous: true}
+		}
+	}
+	return claims
+}
+
+func buildDevice(ctx context.Context, dc config.DeviceConfig, sd *systemd.Client, claim usbClaim, presenceKnown bool) DeviceStatus {
 	ds := DeviceStatus{
 		ID:            dc.ID,
 		Type:          dc.Type,
@@ -171,15 +223,17 @@ func buildDevice(ctx context.Context, dc config.DeviceConfig, sd *systemd.Client
 	ds.Mode = modeFrom(running, activeUnknown)
 	ds.DesiredMode = modeFrom(enabled, enabledUnknown)
 
-	if presenceKnown {
-		matched := device.Match(usb, dc.USBVendorID, dc.USBProductID, dc.Serial)
-		if len(matched) > 0 {
-			ds.Present = true
-			ds.USB = &matched[0]
-		}
+	if presenceKnown && claim.dev != nil {
+		ds.Present = true
+		ds.USB = claim.dev
 	}
 
 	ds.Health = HealthFor(ds)
+	if presenceKnown && claim.ambiguous {
+		// Attribution is unresolvable — that is a conflict to surface, not
+		// a guess to make; the snapshot carries the explaining warning.
+		ds.Health = HealthConflict
+	}
 	return ds
 }
 
@@ -477,25 +531,35 @@ func sweepPendingJobs(ctx context.Context, sd *systemd.Client, dev *config.Devic
 // ActiveState. An unobservable state (list-jobs failing, unit state
 // unknown) is an error, not "quiescent" — absence of evidence is not
 // evidence of absence here.
-func DeviceQuiescent(ctx context.Context, sd *systemd.Client, dev *config.DeviceConfig) (bool, error) {
+//
+// The returned fingerprint is a deterministic digest of every unit's
+// (active, enabled) pair, taken from the SAME reads that produced the
+// verdict: callers demanding stability across N probes compare the
+// fingerprints — a device flapping between two quiescent-looking states is
+// not settled.
+func DeviceQuiescent(ctx context.Context, sd *systemd.Client, dev *config.DeviceConfig) (bool, string, error) {
 	jobs, err := sd.PendingJobs(ctx)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	for _, sc := range dev.Services {
 		if _, ok := jobs[sc.Systemd]; ok {
-			return false, nil
+			return false, "", nil
 		}
 	}
+	parts := make([]string, 0, len(dev.Services))
 	for _, sc := range dev.Services {
-		switch st := sd.UnitStatus(ctx, sc.Systemd); st.Active {
+		st := sd.UnitStatus(ctx, sc.Systemd)
+		switch st.Active {
 		case "activating", "deactivating", "reloading":
-			return false, nil
+			return false, "", nil
 		case "unknown":
-			return false, fmt.Errorf("unit %s state is unobservable", sc.Systemd)
+			return false, "", fmt.Errorf("unit %s state is unobservable", sc.Systemd)
 		}
+		parts = append(parts, sc.Systemd+"="+st.Active+"/"+st.Enabled)
 	}
-	return true, nil
+	sort.Strings(parts)
+	return true, strings.Join(parts, ";"), nil
 }
 
 // LANIP returns the first global unicast IPv4 address of the host.

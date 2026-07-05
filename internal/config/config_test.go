@@ -57,9 +57,11 @@ node:
   id: test
 devices:
   - id: rtl-sdr-01
+    serial: "00000001"
     services:
       rtl-tcp: {systemd: "rtl-tcp@rtl-sdr-01.service"}
   - id: rtl-sdr-02
+    serial: "00000002"
     services:
       rtl-tcp: {systemd: "rtl-tcp@rtl-sdr-02.service"}
 `))
@@ -90,6 +92,52 @@ services:
   idle: {systemd: idle.service}
 `)); err == nil {
 		t.Error("reserved mode name accepted")
+	}
+}
+
+// SDR-P1-05: devices sharing a VID/PID pair need non-empty unique serials —
+// otherwise physical attribution is guesswork.
+func TestValidateRequiresUniqueSerialsForSharedIDs(t *testing.T) {
+	if _, err := Load(writeConfig(t, `
+devices:
+  - id: a
+    services: {rtl-tcp: {systemd: x.service}}
+  - id: b
+    services: {rtl-tcp: {systemd: y.service}}
+`)); err == nil {
+		t.Error("two devices with shared USB ids and no serials accepted")
+	}
+
+	if _, err := Load(writeConfig(t, `
+devices:
+  - id: a
+    serial: "00000001"
+    services: {rtl-tcp: {systemd: x.service}}
+  - id: b
+    serial: "00000001"
+    services: {rtl-tcp: {systemd: y.service}}
+`)); err == nil {
+		t.Error("duplicate serials on a shared VID/PID pair accepted")
+	}
+
+	if _, err := Load(writeConfig(t, `
+devices:
+  - id: a
+    serial: "00000001"
+    services: {rtl-tcp: {systemd: x.service}}
+  - id: b
+    serial: "00000002"
+    services: {rtl-tcp: {systemd: y.service}}
+`)); err != nil {
+		t.Errorf("unique serials rejected: %v", err)
+	}
+
+	// A single device may keep an empty serial — nothing to confuse it with.
+	if _, err := Load(writeConfig(t, `
+services:
+  rtl-tcp: {systemd: x.service}
+`)); err != nil {
+		t.Errorf("single device without serial rejected: %v", err)
 	}
 }
 

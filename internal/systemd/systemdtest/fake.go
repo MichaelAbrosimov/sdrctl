@@ -53,6 +53,7 @@ type Fake struct {
 	linger        map[string]bool
 	stickyEnabled map[string]bool
 	failShow      map[string]error
+	showSequence  map[string][]string
 	keepOnCancel  bool
 	jobs          []pendingJob
 	nextJobID     int
@@ -66,8 +67,18 @@ func New(units map[string]*Unit) *Fake {
 		linger:        map[string]bool{},
 		stickyEnabled: map[string]bool{},
 		failShow:      map[string]error{},
+		showSequence:  map[string][]string{},
 		nextJobID:     1,
 	}
+}
+
+// ShowSequence makes consecutive `systemctl show` calls of the unit report
+// the given ActiveState values in order (the last one repeats) — a unit
+// flapping between otherwise calm-looking states.
+func (f *Fake) ShowSequence(unit string, actives ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.showSequence[unit] = actives
 }
 
 // FailShowUnit makes `systemctl show` of ONE unit fail while other units
@@ -222,8 +233,15 @@ func (f *Fake) run(ctx context.Context, name string, args ...string) (string, er
 		if u == nil {
 			u = &Unit{Load: "not-found"}
 		}
+		active := u.Active
+		if seq := f.showSequence[args[1]]; len(seq) > 0 {
+			active = seq[0]
+			if len(seq) > 1 {
+				f.showSequence[args[1]] = seq[1:]
+			}
+		}
 		return fmt.Sprintf("LoadState=%s\nActiveState=%s\nUnitFileState=%s\nNRestarts=0\nActiveEnterTimestamp=\n",
-			u.Load, u.Active, u.Enabled), nil
+			u.Load, active, u.Enabled), nil
 	case "enable":
 		u := f.units[args[2]]
 		if u == nil || u.Load == "not-found" {

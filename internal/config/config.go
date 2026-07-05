@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -385,6 +386,30 @@ func (c *Config) validate() error {
 	}
 	if defaults > 1 {
 		return fmt.Errorf("more than one device marked default")
+	}
+
+	// Devices sharing a VID/PID pair must carry non-empty UNIQUE serials:
+	// without them physical attribution is guesswork, and the snapshot
+	// would have to hand one dongle to two configurations (SDR-P1-05).
+	byIDs := map[string][]DeviceConfig{}
+	for _, d := range c.Devices {
+		pair := strings.ToLower(d.USBVendorID + ":" + d.USBProductID)
+		byIDs[pair] = append(byIDs[pair], d)
+	}
+	for pair, group := range byIDs {
+		if len(group) < 2 {
+			continue
+		}
+		serials := map[string]string{}
+		for _, d := range group {
+			if d.Serial == "" {
+				return fmt.Errorf("device %s: devices sharing USB ids %s must set non-empty unique serials (assign with rtl_eeprom)", d.ID, pair)
+			}
+			if other, dup := serials[d.Serial]; dup {
+				return fmt.Errorf("devices %s and %s share USB ids %s AND serial %q — they cannot be told apart", other, d.ID, pair, d.Serial)
+			}
+			serials[d.Serial] = d.ID
+		}
 	}
 	return nil
 }
