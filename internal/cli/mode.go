@@ -52,18 +52,23 @@ func init() {
 	rootCmd.AddCommand(modeCmd)
 }
 
+// printMode reads LIVE — via the agent's uncached mode endpoint, or
+// directly from systemd when the agent is down. The observer snapshot is
+// refreshed asynchronously after a transition, so a cached read right
+// after `mode set` would show the previous mode.
 func printMode(cfg *config.Config, dev *config.DeviceConfig) error {
-	snap, _ := agentSnapshot(cfg)
-	for _, d := range snap.Devices {
-		if d.ID == dev.ID {
-			fmt.Println(d.Mode)
-			if d.DesiredMode != d.Mode {
-				fmt.Printf("desired: %s\n", d.DesiredMode)
-			}
-			return nil
+	actual, desired, err := agentclient.New(cfg.Socket.Path, cfg.ModeSetTimeout()).DeviceMode(dev.ID)
+	if err != nil {
+		if !agentclient.IsUnavailable(err) {
+			return fmt.Errorf("%s: %w", dev.ID, err)
 		}
+		actual, desired = core.DeviceModes(context.Background(), systemd.New(), dev)
 	}
-	return fmt.Errorf("device %s not in snapshot", dev.ID)
+	fmt.Println(actual)
+	if desired != actual {
+		fmt.Printf("desired: %s\n", desired)
+	}
+	return nil
 }
 
 // runModeSet is socket-first: the agent is the single executor of mode

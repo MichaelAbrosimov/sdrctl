@@ -308,6 +308,32 @@ func TestQuarantineSurvivesAgentRestart(t *testing.T) {
 	}
 }
 
+// Deploy finding (v0.2 acceptance on the node): the mode endpoints must
+// read LIVE — the observer cache refreshes asynchronously after a
+// transition, and a cached answer right after `mode set` shows the
+// previous mode.
+func TestDeviceModeReadIsLive(t *testing.T) {
+	f := systemdtest.New(idleUnits())
+	srv := newServer(testConfig(), f)
+
+	// Warm the observer cache with the idle state.
+	rec := httptest.NewRecorder()
+	srv.SocketHandler().ServeHTTP(rec, httptest.NewRequest("GET", "/status", nil))
+
+	// The world changes; the cache does not.
+	f.SetUnit("rtl-tcp.service", systemdtest.Unit{Load: "loaded", Active: "active", Enabled: "enabled"})
+
+	rec = httptest.NewRecorder()
+	srv.SocketHandler().ServeHTTP(rec, httptest.NewRequest("GET", "/devices/rtl-sdr-01/mode", nil))
+	var out map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["mode"] != "rtl-tcp" || out["desired_mode"] != "rtl-tcp" {
+		t.Errorf("mode endpoint served the stale cache: %v", out)
+	}
+}
+
 // SDR-P1-03 re-review item 2: after WaitTransitions has begun, no new
 // transition may start — beginTransition and the closing flag share one
 // critical section, so the WaitGroup can never be raised from zero after

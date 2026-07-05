@@ -172,6 +172,14 @@ func (f *Fake) StickyEnabled(unit string) {
 	f.stickyEnabled[unit] = true
 }
 
+// SetUnit replaces one unit's state — for tests where the world changes
+// between reads.
+func (f *Fake) SetUnit(name string, u Unit) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.units[name] = &u
+}
+
 // Calls returns a copy of the executed command log.
 func (f *Fake) Calls() []string {
 	f.mu.Lock()

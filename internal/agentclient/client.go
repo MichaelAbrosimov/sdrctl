@@ -89,6 +89,18 @@ func (c *Client) Status() (core.Snapshot, error) {
 	return snap, err
 }
 
+// DeviceMode reads the LIVE mode pair of one device — the agent serves the
+// mode endpoints from fresh systemd reads, not the observer cache, so the
+// answer is correct immediately after SetMode.
+func (c *Client) DeviceMode(device string) (actual, desired string, err error) {
+	var out struct {
+		Mode        string `json:"mode"`
+		DesiredMode string `json:"desired_mode"`
+	}
+	err = c.do(c.read, http.MethodGet, "/devices/"+url.PathEscape(device)+"/mode", &out)
+	return out.Mode, out.DesiredMode, err
+}
+
 // SetMode switches a device mode through the agent. On the socket this
 // endpoint is synchronous: the response carries the final result.
 func (c *Client) SetMode(device, mode string) (core.SetModeResult, error) {

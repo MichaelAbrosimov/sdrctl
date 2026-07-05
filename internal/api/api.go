@@ -170,12 +170,21 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleDeviceMode reads LIVE, like handleMode: the mode endpoints are what
+// a CLI queries right after `mode set`, and the observer cache is refreshed
+// asynchronously after a transition — a cached answer here shows the
+// PREVIOUS mode for a moment (seen on the node during the v0.2 deploy).
+// Three unit reads are cheap; /status stays the cached bulk view.
 func (s *Server) handleDeviceMode(w http.ResponseWriter, r *http.Request) {
-	if d := s.findDevice(w, r.PathValue("id")); d != nil {
-		writeJSON(w, http.StatusOK, map[string]string{
-			"device": d.ID, "mode": d.Mode, "desired_mode": d.DesiredMode,
-		})
+	dev, err := s.cfg.DeviceByID(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "%v", err)
+		return
 	}
+	actual, desired := core.DeviceModes(r.Context(), s.sd, dev)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"device": dev.ID, "mode": actual, "desired_mode": desired,
+	})
 }
 
 func (s *Server) handleDeviceHealth(w http.ResponseWriter, r *http.Request) {
@@ -377,6 +386,8 @@ func (s *Server) setModeSync(w http.ResponseWriter, id, mode string) {
 		writeErr(w, http.StatusInternalServerError, "%v", err)
 		return
 	}
-	log.Printf("socket: device %s switched to mode %s", id, mode)
+	if res.Changed {
+		log.Printf("socket: device %s switched to mode %s", id, mode)
+	}
 	writeJSON(w, http.StatusOK, res)
 }
