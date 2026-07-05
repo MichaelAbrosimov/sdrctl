@@ -1139,7 +1139,7 @@ unknown при известном actual), плюс
 ### SDR-P3-01 — сделать разбор и валидацию конфигурации строгими
 
 - **Автор:** Codex
-- **Статус:** Пакет 5.1 реализован (ответ ниже) — ожидает ревью Codex/Michael
+- **Статус:** Исправление принято Codex (`34794d3`), ожидает подтверждения Michael
 - **Код:** `internal/config/config.go:118-249`
 
 `yaml.Unmarshal` молча принимает неизвестные поля, а validation проверяет лишь
@@ -1192,6 +1192,15 @@ secrets-overlay; в `validate()` добавлены: `api.listen` = host:port п
 («everything after '---' would be silently ignored») — для основного
 конфига И для secrets-overlay. Тест `TestRejectsMultiDocumentYAML` покрывает
 оба файла.
+
+**Повторное ревью Codex пакета 5.1 (`34794d3`): принято.**
+
+- **Автор ревью:** Codex.
+- После strict decode второй вызов обязан вернуть `io.EOF`; дополнительные
+  YAML-документы больше не могут быть молча проигнорированы.
+- Regression test покрывает основной config и secrets overlay.
+
+Блокирующих замечаний по SDR-P3-01 больше нет.
 
 ### SDR-P3-02 — усилить systemd unit агента
 
@@ -1273,7 +1282,7 @@ reconnect/retained остаётся непокрытым юнит-тестами
 ### SDR-P3-04 — улучшить диагностику ошибок systemd и MQTT
 
 - **Автор:** Codex
-- **Статус:** Пакет 5.1 реализован (ответ ниже) — ожидает ревью Codex/Michael
+- **Статус:** Исправление принято Codex (`34794d3`), ожидает подтверждения Michael
 - **Код:** `internal/systemd/systemd.go:54-88`,
   `internal/mqtt/mqtt.go:57-84`
 
@@ -1352,6 +1361,20 @@ availability. Дополнительно закрыт хвост settling-зам
 Rate-limited journald для systemd-ошибок и проверка offline availability
 реализованы корректно; HTTP `/status` действительно показывает quarantine.
 
+**Повторное ревью Codex пакета 5.1 (`34794d3`): принято.**
+
+- **Автор ревью:** Codex.
+- MQTT token ожидается через ограниченный `WaitTimeout`; вечный token больше
+  не удерживает diagnostic goroutine навсегда.
+- Quarantine применяется в `Observer.Refresh` до сохранения snapshot:
+  per-device flag, warning и `ok=false` одинаково доступны HTTP, retained
+  MQTT status и health-only мониторингу; изменение участвует в `Equal` и
+  запускает notification path.
+- Тесты покрывают never-ack token, observer notification и HTTP status.
+
+Блокирующих замечаний по SDR-P3-04 и программной видимости quarantine больше
+нет.
+
 ---
 
 ## Выполненные проверки
@@ -1386,6 +1409,15 @@ dev-Mac (toolchain с поддержкой race) — пройдено. Огов�
 6. После этого закрыть auto-restore/config validation и расширить regression
    tests.
 
+**Итог процесса (2026-07-05):** все 14 исходных замечаний (5 P1, 5 P2,
+4 P3) плюс выявленные по ходу ревью-итераций блокеры ЗАКРЫТЫ и приняты
+Codex. Открытыми остаются только деплой-шаги на целевом узле: поочерёдное
+включение hardening-директив (SDR-P3-02; при `RestrictAddressFamilies`
+проверить `LANIP()`/AF_NETLINK) и acceptance-проверка MQTT
+reconnect/retained с реальным брокером (SDR-P3-03). Процесс: 5 пакетов,
+11 ревью-итераций Codex, каждая правка с регрессионными тестами;
+`go test -race -count=1 ./...` зелёный на финальной ревизии.
+
 **Ход исправлений (обновляется):**
 
 - **Пакет 1 (SDR-P1-02 + SDR-P1-03) — реализован, ожидает ревью.** Состав:
@@ -1412,8 +1444,8 @@ dev-Mac (toolchain с поддержкой race) — пройдено. Огов�
   context должен быть связан с lifecycle агента. Подробности и авторство — в
   секции SDR-P1-03 выше.
 
-- **Пакет 5 (P3: SDR-P3-01…04 + видимость карантина) — проверен Codex,
-  требуются изменения.** `KnownFields(true)` (конфиг + secrets) и операционная валидация
+- **Пакет 5 (P3: SDR-P3-01…04 + видимость карантина) — программная часть
+  принята Codex после пакета 5.1.** `KnownFields(true)` (конфиг + secrets) и операционная валидация
   (listen, broker, QoS, heartbeat, порты, запрет общего юнита);
   rate-limited журнал причин systemctl-ошибок + проверка MQTT
   publish-токенов; auth-матрица сетевого API и per-device inflight в
@@ -1428,13 +1460,19 @@ dev-Mac (toolchain с поддержкой race) — пройдено. Огов�
   MQTT retained status. `go test -race -count=1 ./...`, `go vet ./...`,
   `make build`, `gofmt -l` и `git diff --check` пройдены.
 
-- **Пакет 5.1 (по ревью пакета 5) — реализован, ожидает ревью.** Второй
+- **Пакет 5.1 (по ревью пакета 5) — принят Codex (`34794d3`).** Второй
   YAML-документ отклоняется (конфиг + secrets); ожидание MQTT-токена
   ограничено 30 с с тестом на вечный токен; карантин мигрировал в точку
   рождения снапшотов (`Snapshot.ApplyQuarantine` в `Observer.Refresh`):
   HTTP/MQTT/события несут одну картину, вход в карантин порождает событие,
   `ok=false` при карантине — решение по /health принято явно;
   `Server.decorate` удалён. Детали — в ответах секций SDR-P3-01 и SDR-P3-04.
+
+  **Повторное ревью Codex от 2026-07-05:** все три блокера закрыты без новых
+  замечаний. `go test -race -count=1 ./...`, `go vet ./...`, `make build`,
+  `gofmt -l` и `git diff --check` пройдены. Из пакета 5 остаются внешние
+  acceptance-действия: MQTT reconnect/retained с реальным broker и
+  поочерёдное включение systemd hardening на DietPi.
 
 - **Пакет 4.1 (по ревью пакета 4) — принят Codex (`4aabc05`).** Оба
   блокера закрыты: optional-исключение агрегатора применяется только к
