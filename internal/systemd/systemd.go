@@ -10,9 +10,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 // NotInstalled is the status reported for units systemd does not know about.
@@ -42,10 +45,33 @@ func runCommand(ctx context.Context, name string, args ...string) (string, error
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			err = ctxErr
 		}
-		return buf.String(), fmt.Errorf("%s %s: %w: %s",
+		err = fmt.Errorf("%s %s: %w: %s",
 			name, strings.Join(args, " "), err, strings.TrimSpace(buf.String()))
+		// The public state model deliberately degrades errors to "unknown";
+		// the CAUSE still belongs in the journal — rate-limited, because
+		// the observer re-reads every few seconds and a dead D-Bus would
+		// otherwise flood it with identical lines.
+		logRateLimited(name+" "+args[0], "systemd: %v", err)
+		return buf.String(), err
 	}
 	return buf.String(), nil
+}
+
+const logRateInterval = 30 * time.Second
+
+var (
+	logMu   sync.Mutex
+	lastLog = map[string]time.Time{}
+)
+
+func logRateLimited(key, format string, args ...any) {
+	logMu.Lock()
+	defer logMu.Unlock()
+	if time.Since(lastLog[key]) < logRateInterval {
+		return
+	}
+	lastLog[key] = time.Now()
+	log.Printf(format, args...)
 }
 
 // UnitStatus is a point-in-time view of one systemd unit.

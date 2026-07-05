@@ -247,6 +247,19 @@ func (c *Coordinator) VerifyQuiescent(ctx context.Context, sd *systemd.Client, d
 	return nil
 }
 
+// QuarantinedSince returns the quarantine entry time per device id, for
+// surfacing the state in /status — the caller of a refused write should
+// not be the only one who can see WHY.
+func (c *Coordinator) QuarantinedSince() map[string]time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]time.Time, len(c.quarantine))
+	for id, rec := range c.quarantine {
+		out[id] = rec.since
+	}
+	return out
+}
+
 // Go runs fn asynchronously inside the drain group, unless shutdown has
 // already begun.
 func (c *Coordinator) Go(fn func()) {

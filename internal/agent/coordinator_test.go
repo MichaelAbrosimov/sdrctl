@@ -47,6 +47,23 @@ func degradedSnapshot() core.Snapshot {
 	}}}
 }
 
+// SDR-P3-03: the guard is per device — one device's transition never
+// blocks another's.
+func TestInflightIsPerDevice(t *testing.T) {
+	c := NewCoordinator()
+	if err := c.BeginTransition("rtl-sdr-01"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.BeginTransition("rtl-sdr-02"); err != nil {
+		t.Errorf("second device blocked by first device's transition: %v", err)
+	}
+	if err := c.BeginTransition("rtl-sdr-01"); err == nil {
+		t.Error("same device double-claimed")
+	}
+	c.EndTransition("rtl-sdr-01")
+	c.EndTransition("rtl-sdr-02")
+}
+
 // SDR-P1-03 third-review item 1: a quarantine set after an external gate
 // check must still be caught — BeginTransition re-checks it inside the same
 // critical section as the claim.

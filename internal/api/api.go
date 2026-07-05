@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/MichaelAbrosimov/sdrctl/internal/agent"
@@ -129,7 +130,34 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.obs.Latest())
+	writeJSON(w, http.StatusOK, s.decorate(s.obs.Latest()))
+}
+
+// decorate augments an observer snapshot with coordinator state the
+// observer cannot know: quarantined devices. The 409 a refused write gets
+// must not be the only place the quarantine is visible — /status (and
+// therefore sdrctl status and MQTT consumers reading it) carries it too.
+func (s *Server) decorate(snap core.Snapshot) core.Snapshot {
+	quarantined := s.coord.QuarantinedSince()
+	if len(quarantined) == 0 {
+		return snap
+	}
+	ids := make([]string, 0, len(quarantined))
+	for id := range quarantined {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	// Warnings is appended on a copy: Latest() snapshots are shared.
+	snap.Warnings = append(append([]string(nil), snap.Warnings...), func() []string {
+		var w []string
+		for _, id := range ids {
+			w = append(w, fmt.Sprintf(
+				"device %s is quarantined since %s: an earlier transition could not be verified as cleaned up; writes are refused until the device is verified quiescent",
+				id, quarantined[id].UTC().Format(time.RFC3339)))
+		}
+		return w
+	}()...)
+	return snap
 }
 
 func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {

@@ -141,6 +141,60 @@ services:
 	}
 }
 
+// SDR-P3-01: a typo must fail loudly, not silently enable a default — the
+// CLI and the agent have to read the SAME config.
+func TestStrictParsingAndOperationalValidation(t *testing.T) {
+	if _, err := Load(writeConfig(t, `
+mode_set_timout_sec: 20
+services:
+  rtl-tcp: {systemd: x.service}
+`)); err == nil {
+		t.Error("typo'd field accepted silently")
+	}
+
+	if _, err := Load(writeConfig(t, `
+mqtt:
+  enabled: true
+services:
+  rtl-tcp: {systemd: x.service}
+`)); err == nil {
+		t.Error("mqtt.enabled without broker accepted")
+	}
+
+	if _, err := Load(writeConfig(t, `
+mqtt:
+  qos: 3
+services:
+  rtl-tcp: {systemd: x.service}
+`)); err == nil {
+		t.Error("qos 3 accepted")
+	}
+
+	if _, err := Load(writeConfig(t, `
+api:
+  listen: "no-port-here"
+services:
+  rtl-tcp: {systemd: x.service}
+`)); err == nil {
+		t.Error("unparseable api.listen accepted")
+	}
+
+	if _, err := Load(writeConfig(t, `
+services:
+  rtl-tcp: {systemd: x.service, port: 70000}
+`)); err == nil {
+		t.Error("out-of-range port accepted")
+	}
+
+	if _, err := Load(writeConfig(t, `
+services:
+  rtl-tcp: {systemd: same.service}
+  rtl-433: {systemd: same.service}
+`)); err == nil {
+		t.Error("two modes sharing one systemd unit accepted")
+	}
+}
+
 func TestMissingFileUsesDefaults(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
 	if err != nil {

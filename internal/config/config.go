@@ -6,8 +6,11 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,7 +179,12 @@ func Load(path string) (*Config, error) {
 	case err != nil:
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	default:
-		if err := yaml.Unmarshal(data, cfg); err != nil {
+		// Strict decoding: an unknown field is almost always a typo that
+		// would otherwise silently enable a default — the CLI and the
+		// agent must read the SAME config, so both fail loudly here.
+		dec := yaml.NewDecoder(bytes.NewReader(data))
+		dec.KnownFields(true)
+		if err := dec.Decode(cfg); err != nil && !errors.Is(err, io.EOF) {
 			return nil, fmt.Errorf("parse config %s: %w", path, err)
 		}
 		cfg.Loaded = true
@@ -225,7 +233,9 @@ func (c *Config) LoadSecrets() error {
 			Password string `yaml:"password"`
 		} `yaml:"mqtt"`
 	}
-	if err := yaml.Unmarshal(data, &s); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&s); err != nil && !errors.Is(err, io.EOF) {
 		return fmt.Errorf("parse secrets %s: %w", path, err)
 	}
 
@@ -386,6 +396,38 @@ func (c *Config) validate() error {
 	}
 	if defaults > 1 {
 		return fmt.Errorf("more than one device marked default")
+	}
+
+	// Operational cross-field checks: refuse at load time what would
+	// otherwise surface as a late runtime surprise.
+	if c.API.Enabled {
+		if _, _, err := net.SplitHostPort(c.API.Listen); err != nil {
+			return fmt.Errorf("api.listen %q is not host:port: %v", c.API.Listen, err)
+		}
+	}
+	if c.MQTT.Enabled && c.MQTT.Broker == "" {
+		return fmt.Errorf("mqtt.enabled is true but mqtt.broker is empty")
+	}
+	if c.MQTT.QoS > 2 {
+		return fmt.Errorf("mqtt.qos %d is invalid (0..2)", c.MQTT.QoS)
+	}
+	if c.MQTT.HeartbeatSec < 0 {
+		return fmt.Errorf("mqtt.heartbeat_sec must not be negative")
+	}
+	unitOwners := map[string]string{}
+	for _, d := range c.Devices {
+		for name, s := range d.Services {
+			ref := d.ID + "/" + name
+			if s.Port < 0 || s.Port > 65535 {
+				return fmt.Errorf("%s: port %d out of range", ref, s.Port)
+			}
+			// One systemd unit = one mode of one device; sharing a unit
+			// between modes would make both claim the same actual state.
+			if other, dup := unitOwners[s.Systemd]; dup {
+				return fmt.Errorf("services %s and %s share systemd unit %s", other, ref, s.Systemd)
+			}
+			unitOwners[s.Systemd] = ref
+		}
 	}
 
 	// Devices sharing a VID/PID pair must carry non-empty UNIQUE serials:

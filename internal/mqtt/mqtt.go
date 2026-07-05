@@ -59,7 +59,11 @@ func (p *Publisher) Start() { p.cli.Connect() }
 func (p *Publisher) Close() {
 	if p.cli.IsConnectionOpen() {
 		tok := p.cli.Publish(p.cfg.TopicPrefix+"/availability", p.cfg.QoS, true, "offline")
-		tok.WaitTimeout(time.Second)
+		if !tok.WaitTimeout(time.Second) {
+			log.Printf("mqtt: timed out publishing offline availability")
+		} else if err := tok.Error(); err != nil {
+			log.Printf("mqtt: publish offline availability: %v", err)
+		}
 	}
 	p.cli.Disconnect(250)
 }
@@ -80,7 +84,15 @@ func (p *Publisher) publish(topic string, retain bool, payload any) {
 			return
 		}
 	}
-	p.cli.Publish(topic, p.cfg.QoS, retain && p.cfg.Retain, data)
+	tok := p.cli.Publish(topic, p.cfg.QoS, retain && p.cfg.Retain, data)
+	// Fire-and-forget stays fire-and-forget for the control plane, but the
+	// operator gets to SEE a failed publish: wait out of band and log.
+	go func() {
+		tok.Wait()
+		if err := tok.Error(); err != nil {
+			log.Printf("mqtt: publish %s: %v", topic, err)
+		}
+	}()
 }
 
 // PublishSnapshot pushes retained state topics and, when prev is a real

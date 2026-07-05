@@ -18,5 +18,16 @@ RuntimeDirectoryMode=0755
 # polkit rules for org.freedesktop.systemd1 is documented in docs/architecture.md.
 User=root
 
+# Hardening (SDR-P3-02). Deliberately shipped COMMENTED: enable one
+# directive per deploy on the target DietPi and rerun the acceptance checks
+# from docs/install-wyse-sdr-01.md §5 — a batch enable that breaks D-Bus,
+# sysfs or the control socket is undebuggable. Expected-safe set:
+#   NoNewPrivileges=true
+#   ProtectHome=true
+#   PrivateTmp=true
+#   ProtectSystem=strict        # /run covered by RuntimeDirectory, /sys read-only is fine
+#   RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+#   UMask=0077                  # socket is explicitly chmod'ed 0660 after listen
+
 [Install]
 WantedBy=multi-user.target

@@ -52,6 +52,68 @@ func TestNetworkWriteStaysTokenGated(t *testing.T) {
 	}
 }
 
+// SDR-P3-03: full auth matrix of the network write API.
+func TestNetworkWriteAuthMatrix(t *testing.T) {
+	post := func(srv *Server, auth string) int {
+		req := httptest.NewRequest("POST", "/devices/rtl-sdr-01/mode/rtl-tcp", nil)
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	// write_enabled but no token configured → 403 regardless of header.
+	cfg := testConfig()
+	cfg.API.WriteEnabled = true
+	if code := post(newServer(cfg, systemdtest.New(idleUnits())), "Bearer whatever"); code != http.StatusForbidden {
+		t.Errorf("write with no configured token: got %d, want 403", code)
+	}
+
+	// Token configured: missing header → 401, wrong token → 401, right → 202.
+	cfg = testConfig()
+	cfg.API.WriteEnabled = true
+	cfg.API.Token = "sekret"
+	srv := newServer(cfg, systemdtest.New(idleUnits()))
+	if code := post(srv, ""); code != http.StatusUnauthorized {
+		t.Errorf("missing bearer: got %d, want 401", code)
+	}
+	if code := post(srv, "Bearer wrong"); code != http.StatusUnauthorized {
+		t.Errorf("wrong bearer: got %d, want 401", code)
+	}
+	if code := post(srv, "Bearer sekret"); code != http.StatusAccepted {
+		t.Errorf("valid bearer: got %d, want 202", code)
+	}
+	srv.WaitTransitions() // drain the accepted async transition
+}
+
+// Settling surface: a quarantined device is visible in /status, not only
+// in the 409 a refused write receives.
+func TestStatusExposesQuarantine(t *testing.T) {
+	srv := newServer(testConfig(), systemdtest.New(idleUnits()))
+	srv.coord.Quarantine("rtl-sdr-01")
+
+	rec := httptest.NewRecorder()
+	srv.SocketHandler().ServeHTTP(rec, httptest.NewRequest("GET", "/status", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: %d", rec.Code)
+	}
+	var snap core.Snapshot
+	if err := json.Unmarshal(rec.Body.Bytes(), &snap); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, w := range snap.Warnings {
+		if strings.Contains(w, "rtl-sdr-01 is quarantined") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("quarantine not surfaced in /status warnings: %v", snap.Warnings)
+	}
+}
+
 func TestSocketWriteNeedsNoToken(t *testing.T) {
 	f := systemdtest.New(idleUnits())
 	srv := newServer(testConfig(), f)
