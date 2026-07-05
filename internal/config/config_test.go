@@ -147,6 +147,92 @@ services:
 	}
 }
 
+// SDR-P1-04: the agent-only secrets overlay separates "CLI must read the
+// config" from "the agent must hide credentials".
+func TestSecretsOverlay(t *testing.T) {
+	cfgPath := writeConfig(t, `
+api:
+  write_enabled: true
+services:
+  rtl-tcp:
+    systemd: rtl-tcp.service
+`)
+	secrets := filepath.Join(filepath.Dir(cfgPath), "secrets.yaml")
+	if err := os.WriteFile(secrets, []byte("api:\n  token: sekret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.API.Token != "" {
+		t.Error("main config must not have picked the token up on its own")
+	}
+	if err := cfg.LoadSecrets(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.API.Token != "sekret" {
+		t.Errorf("token not merged from overlay: %q", cfg.API.Token)
+	}
+	if err := cfg.CheckSecretPerms(); err != nil {
+		t.Errorf("0600 overlay rejected: %v", err)
+	}
+
+	// A group-readable secret file must be refused while its secret is in use.
+	if err := os.Chmod(secrets, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	cfg2, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg2.LoadSecrets(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg2.CheckSecretPerms(); err == nil {
+		t.Error("group-readable secrets file with write API enabled was accepted")
+	}
+}
+
+// Secrets in the MAIN config are refused too when readable beyond owner —
+// but only while the corresponding subsystem actually uses them.
+func TestCheckSecretPermsMainConfig(t *testing.T) {
+	cfgPath := writeConfig(t, `
+api:
+  write_enabled: true
+  token: in-main-file
+services:
+  rtl-tcp:
+    systemd: rtl-tcp.service
+`)
+	// writeConfig creates 0644.
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.CheckSecretPerms(); err == nil {
+		t.Error("world-readable main config carrying an active token was accepted")
+	}
+
+	// Same file, write API off: the token is inert, the agent may run.
+	cfgPathOff := writeConfig(t, `
+api:
+  write_enabled: false
+  token: in-main-file
+services:
+  rtl-tcp:
+    systemd: rtl-tcp.service
+`)
+	cfgOff, err := Load(cfgPathOff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfgOff.CheckSecretPerms(); err != nil {
+		t.Errorf("inert token blocked agent start: %v", err)
+	}
+}
+
 func TestTimingHelpersFallBackOnHandBuiltConfig(t *testing.T) {
 	cfg := &Config{} // built directly, no normalize()
 	if cfg.ModeSetTimeout().Seconds() != 15 || cfg.RestoreCooldown().Seconds() != 30 {

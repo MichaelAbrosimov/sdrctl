@@ -125,9 +125,18 @@ Then:
 
 - MQTT telemetry: set `mqtt.enabled: true` and `mqtt.broker`, restart the
   agent, subscribe to `sdr/wyse-sdr-01/#`.
-- Remote control (for sdr-manager): set `api.write_enabled: true` **and** a
-  long random `api.token`; keep the node on a trusted LAN — the API has no
-  TLS in v0.1.
+- Remote control (for sdr-manager): set `api.write_enabled: true` and put a
+  long random token into the agent-only secrets overlay:
+
+  ```bash
+  install -m 0600 -o root -g root configs/secrets.example.yaml /etc/sdrctl/secrets.yaml
+  # edit api.token inside; keep config.yaml itself secret-free
+  ```
+
+  The agent refuses to start if a file supplying an ACTIVE secret (token
+  with write API on, MQTT credentials with MQTT on) is readable beyond its
+  owner — migrating an old token out of a 0640 config.yaml is mandatory,
+  not cosmetic. Keep the node on a trusted LAN — the API has no TLS.
 
 ## Notes
 

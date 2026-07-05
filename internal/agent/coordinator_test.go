@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MichaelAbrosimov/sdrctl/internal/config"
 	"github.com/MichaelAbrosimov/sdrctl/internal/core"
@@ -178,6 +179,31 @@ func TestAutoRestoreReChecksDesiredUnderGuard(t *testing.T) {
 	obs.autoRestore(context.Background(), degradedSnapshot())
 	if mutated(f.Calls()) {
 		t.Errorf("auto-restore acted on a stale snapshot decision:\n%s", strings.Join(f.Calls(), "\n"))
+	}
+}
+
+// Third-review item 4 / settling (в): leaving quarantine requires N
+// consecutive stable observations, not one lucky read.
+func TestQuarantineExitRequiresStableQuiescence(t *testing.T) {
+	f := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "active", Enabled: "enabled"},
+	})
+	c := NewCoordinator()
+	dev := &coordTestConfig().Devices[0]
+	c.Quarantine(dev.ID)
+
+	before := len(f.Calls())
+	if err := c.GateWrite(context.Background(), f.Client(), dev, time.Hour); err != nil {
+		t.Fatalf("stable device did not leave quarantine: %v", err)
+	}
+	listJobs := 0
+	for _, call := range f.Calls()[before:] {
+		if strings.Contains(call, "list-jobs") {
+			listJobs++
+		}
+	}
+	if listJobs < quiescenceConfirmations {
+		t.Errorf("quarantine lifted after %d quiescence reads, want at least %d", listJobs, quiescenceConfirmations)
 	}
 }
 

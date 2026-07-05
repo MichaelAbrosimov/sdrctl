@@ -16,6 +16,15 @@ import (
 // ErrShuttingDown is returned by BeginTransition after shutdown has begun.
 var ErrShuttingDown = errors.New("agent is shutting down")
 
+// Quarantine exit demands STABILITY, not one lucky instant: a single
+// quiescent read can land between a restart timer tick and the next job
+// (settling design note, criterion (в)). N consecutive confirmations with
+// gaps make a flapping unit visible.
+const (
+	quiescenceConfirmations = 3
+	quiescenceProbeGap      = 150 * time.Millisecond
+)
+
 type quarantineRec struct {
 	since time.Time
 	// capNotified: the hard-cap expiry was already reported to a caller;
@@ -151,14 +160,36 @@ func (c *Coordinator) GateWrite(ctx context.Context, sd *systemd.Client, dev *co
 		c.mu.Unlock()
 	}
 
-	quiet, err := core.DeviceQuiescent(ctx, sd, dev)
+	// First-write verification takes one read; leaving quarantine takes N
+	// consecutive stable ones — the device got there by being ambiguous.
+	confirmations := 1
+	if quarantined {
+		confirmations = quiescenceConfirmations
+	}
+	quiet := false
+	var err error
+	for i := 0; i < confirmations; i++ {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				err = ctx.Err()
+			case <-time.After(quiescenceProbeGap):
+			}
+			if err != nil {
+				break
+			}
+		}
+		if quiet, err = core.DeviceQuiescent(ctx, sd, dev); err != nil || !quiet {
+			break
+		}
+	}
 	if err == nil && quiet {
 		c.mu.Lock()
 		delete(c.quarantine, dev.ID)
 		c.verified[dev.ID] = true
 		c.mu.Unlock()
 		if quarantined {
-			log.Printf("coordinator: device %s verified quiescent, quarantine lifted", dev.ID)
+			log.Printf("coordinator: device %s stable across %d reads, quarantine lifted", dev.ID, confirmations)
 		}
 		return nil
 	}

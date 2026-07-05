@@ -20,11 +20,16 @@ func (s *Server) RunSocket(ctx context.Context, path, group string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	// Remove a stale socket left by an unclean shutdown, but never delete
-	// something that is not a socket.
+	// Remove a stale socket left by an unclean shutdown — but only a STALE
+	// one: a socket that still accepts connections belongs to a live agent,
+	// and stealing it would silently run two observers/auto-restores in
+	// parallel. Never delete something that is not a socket either.
 	if fi, err := os.Lstat(path); err == nil {
 		if fi.Mode()&os.ModeSocket == 0 {
 			return fmt.Errorf("%s exists and is not a socket", path)
+		}
+		if socketAlive(path) {
+			return fmt.Errorf("another agent is already serving %s — refusing to take over its socket", path)
 		}
 		if err := os.Remove(path); err != nil {
 			return err
@@ -50,6 +55,18 @@ func (s *Server) RunSocket(ctx context.Context, path, group string) error {
 	case err := <-errc:
 		return err
 	}
+}
+
+// socketAlive reports whether something is still accepting connections on
+// the unix socket. A stale file from an unclean shutdown refuses the dial;
+// a live listener accepts it.
+func socketAlive(path string) bool {
+	conn, err := net.DialTimeout("unix", path, time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 // restrictSocket narrows the fresh socket to root:<group> 0660: file

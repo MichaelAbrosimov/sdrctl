@@ -15,6 +15,10 @@ api:
   # until BOTH write_enabled is true and a token is set. Read API is always
   # available while api.enabled is true.
   write_enabled: false
+  # Put the token into /etc/sdrctl/secrets.yaml (0600 root:root, see
+  # configs/secrets.example.yaml), NOT here: this file must stay readable
+  # for the operator CLI. The agent refuses to start when an ACTIVE secret
+  # sits in a file readable beyond its owner.
   token: ""
 
 # Local control socket — the CLI's primary channel. Always served while the

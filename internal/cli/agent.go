@@ -36,6 +36,14 @@ var agentCmd = &cobra.Command{
 				return err
 			}
 		}
+		// Agent-only secrets overlay; then refuse to run with a leaky
+		// secret file — see SDR-P1-04 in CODE_REVIEW.md.
+		if err := cfg.LoadSecrets(); err != nil {
+			return err
+		}
+		if err := cfg.CheckSecretPerms(); err != nil {
+			return err
+		}
 		sd := systemd.New()
 		// One coordinator = one per-device transition guard for the whole
 		// process: API writes and auto-restore share it.

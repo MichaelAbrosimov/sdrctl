@@ -23,6 +23,15 @@ type Observer struct {
 	cfg   *config.Config
 	sd    *systemd.Client
 	coord *Coordinator
+	// build is core.BuildSnapshot, injectable for concurrency tests.
+	build func(context.Context, *config.Config, *systemd.Client) core.Snapshot
+
+	// refreshMu serializes the WHOLE refresh cycle (build → compare →
+	// store → notify): concurrent refreshes — the poll ticker vs the
+	// post-transition refresh — must not let an older-but-slower snapshot
+	// overwrite a newer one and emit a backwards MQTT event. It also
+	// guarantees onChange callbacks observe snapshots in storage order.
+	refreshMu sync.Mutex
 
 	mu       sync.RWMutex
 	last     core.Snapshot
@@ -33,7 +42,11 @@ type Observer struct {
 }
 
 func New(cfg *config.Config, sd *systemd.Client, coord *Coordinator) *Observer {
-	return &Observer{cfg: cfg, sd: sd, coord: coord, lastRestore: map[string]time.Time{}}
+	return &Observer{
+		cfg: cfg, sd: sd, coord: coord,
+		build:       core.BuildSnapshot,
+		lastRestore: map[string]time.Time{},
+	}
 }
 
 // OnChange registers a listener; must be called before Run.
@@ -59,9 +72,13 @@ func (o *Observer) Latest() core.Snapshot {
 // timeout the affected fields degrade to "unknown", which after SDR-P1-01
 // will surface as non-ok health rather than a silent hang.
 func (o *Observer) Refresh() core.Snapshot {
+	// One refresh at a time, start to finish (see refreshMu).
+	o.refreshMu.Lock()
+	defer o.refreshMu.Unlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), o.cfg.ModeSetTimeout())
 	defer cancel()
-	cur := core.BuildSnapshot(ctx, o.cfg, o.sd)
+	cur := o.build(ctx, o.cfg, o.sd)
 
 	o.mu.Lock()
 	prev, had := o.last, o.haveLast

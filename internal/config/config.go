@@ -8,6 +8,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -52,6 +53,15 @@ type Config struct {
 	Path string `yaml:"-"`
 	// Loaded is false when the file was missing and defaults are in use.
 	Loaded bool `yaml:"-"`
+	// secretFiles records which files supplied which secrets, so the agent
+	// can refuse to run with a leaky one (CheckSecretPerms).
+	secretFiles []secretSource
+}
+
+type secretSource struct {
+	path string
+	api  bool // supplied api.token
+	mqtt bool // supplied mqtt credentials
 }
 
 type NodeConfig struct {
@@ -138,7 +148,91 @@ func Load(path string) (*Config, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
+	if cfg.API.Token != "" || cfg.MQTT.Password != "" || cfg.MQTT.Username != "" {
+		cfg.secretFiles = append(cfg.secretFiles, secretSource{
+			path: path,
+			api:  cfg.API.Token != "",
+			mqtt: cfg.MQTT.Password != "" || cfg.MQTT.Username != "",
+		})
+	}
 	return cfg, nil
+}
+
+// SecretsPath is the agent-only overlay next to the main config file.
+func (c *Config) SecretsPath() string {
+	return filepath.Join(filepath.Dir(c.Path), "secrets.yaml")
+}
+
+// LoadSecrets merges the agent-only secrets overlay (0600 root:root) into
+// the config: api.token and mqtt credentials. Only `sdrctl agent` calls
+// this — the operator-readable main config no longer needs to carry
+// secrets, which resolves the "CLI must read it, agent must hide it"
+// conflict. A missing overlay is fine; an unreadable one is an error (the
+// agent runs as root, so this signals a real problem, not a permission
+// model at work).
+func (c *Config) LoadSecrets() error {
+	path := c.SecretsPath()
+	data, err := os.ReadFile(path)
+	switch {
+	case os.IsNotExist(err):
+		return nil
+	case err != nil:
+		return fmt.Errorf("read secrets %s: %w", path, err)
+	}
+
+	var s struct {
+		API struct {
+			Token string `yaml:"token"`
+		} `yaml:"api"`
+		MQTT struct {
+			Username string `yaml:"username"`
+			Password string `yaml:"password"`
+		} `yaml:"mqtt"`
+	}
+	if err := yaml.Unmarshal(data, &s); err != nil {
+		return fmt.Errorf("parse secrets %s: %w", path, err)
+	}
+
+	src := secretSource{path: path}
+	if s.API.Token != "" {
+		c.API.Token = s.API.Token
+		src.api = true
+	}
+	if s.MQTT.Username != "" {
+		c.MQTT.Username = s.MQTT.Username
+		src.mqtt = true
+	}
+	if s.MQTT.Password != "" {
+		c.MQTT.Password = s.MQTT.Password
+		src.mqtt = true
+	}
+	if src.api || src.mqtt {
+		c.secretFiles = append(c.secretFiles, src)
+	}
+	return nil
+}
+
+// CheckSecretPerms refuses group/world-readable files that supply secrets
+// the agent will actually use. A refusal, not a warning: nobody reads
+// journald warnings, and a leaked bearer token controls the SDR node
+// bypassing the sdrctl group entirely.
+func (c *Config) CheckSecretPerms() error {
+	for _, src := range c.secretFiles {
+		inUse := (src.api && c.API.WriteEnabled) || (src.mqtt && c.MQTT.Enabled)
+		if !inUse {
+			continue
+		}
+		fi, err := os.Stat(src.path)
+		if err != nil {
+			return fmt.Errorf("stat %s: %w", src.path, err)
+		}
+		if fi.Mode().Perm()&0o077 != 0 {
+			return fmt.Errorf(
+				"%s carries active secrets but is readable beyond its owner (%04o); move them to %s with mode 0600 (install -m 0600) or tighten the file",
+				src.path, fi.Mode().Perm(), c.SecretsPath())
+		}
+	}
+	return nil
 }
 
 func defaults() *Config {
