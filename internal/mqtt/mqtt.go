@@ -87,12 +87,22 @@ func (p *Publisher) publish(topic string, retain bool, payload any) {
 	tok := p.cli.Publish(topic, p.cfg.QoS, retain && p.cfg.Retain, data)
 	// Fire-and-forget stays fire-and-forget for the control plane, but the
 	// operator gets to SEE a failed publish: wait out of band and log.
-	go func() {
-		tok.Wait()
-		if err := tok.Error(); err != nil {
-			log.Printf("mqtt: publish %s: %v", topic, err)
-		}
-	}()
+	go waitAndLog(topic, tok)
+}
+
+// publishWaitTimeout bounds the diagnostic wait on a publish token: a
+// broker that accepts the connection but never PUBACKs must not accumulate
+// one goroutine per heartbeat forever. Variable for tests.
+var publishWaitTimeout = 30 * time.Second
+
+func waitAndLog(topic string, tok paho.Token) {
+	if !tok.WaitTimeout(publishWaitTimeout) {
+		log.Printf("mqtt: publish %s: no ack within %s", topic, publishWaitTimeout)
+		return
+	}
+	if err := tok.Error(); err != nil {
+		log.Printf("mqtt: publish %s: %v", topic, err)
+	}
 }
 
 // PublishSnapshot pushes retained state topics and, when prev is a real

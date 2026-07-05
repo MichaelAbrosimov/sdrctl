@@ -49,20 +49,24 @@ type ServiceDetail struct {
 }
 
 type DeviceStatus struct {
-	ID            string                   `json:"id"`
-	Type          string                   `json:"type"`
-	Label         string                   `json:"label,omitempty"`
-	Serial        string                   `json:"serial,omitempty"`
-	Optional      bool                     `json:"optional,omitempty"`
-	Present       bool                     `json:"present"`
-	PresenceKnown bool                     `json:"presence_known"`
-	Mode          string                   `json:"mode"`
-	DesiredMode   string                   `json:"desired_mode"`
-	Health        string                   `json:"health"`
-	Services      map[string]string        `json:"services"`
-	ServiceInfo   map[string]ServiceDetail `json:"service_details,omitempty"`
-	Ports         map[string]int           `json:"ports,omitempty"`
-	USB           *device.USBDevice        `json:"usb,omitempty"`
+	ID            string `json:"id"`
+	Type          string `json:"type"`
+	Label         string `json:"label,omitempty"`
+	Serial        string `json:"serial,omitempty"`
+	Optional      bool   `json:"optional,omitempty"`
+	Present       bool   `json:"present"`
+	PresenceKnown bool   `json:"presence_known"`
+	Mode          string `json:"mode"`
+	DesiredMode   string `json:"desired_mode"`
+	Health        string `json:"health"`
+	// Quarantined: an earlier transition's cleanup could not be verified;
+	// writes are refused until the device is proven quiescent. Set by the
+	// agent's coordinator via Snapshot.ApplyQuarantine.
+	Quarantined bool                     `json:"quarantined,omitempty"`
+	Services    map[string]string        `json:"services"`
+	ServiceInfo map[string]ServiceDetail `json:"service_details,omitempty"`
+	Ports       map[string]int           `json:"ports,omitempty"`
+	USB         *device.USBDevice        `json:"usb,omitempty"`
 }
 
 type Snapshot struct {
@@ -332,6 +336,40 @@ func aggregate(devices []DeviceStatus) (bool, string) {
 		return true, HealthHealthy
 	default:
 		return true, HealthIdle
+	}
+}
+
+// ApplyQuarantine merges the agent coordinator's quarantine state into the
+// snapshot: per-device flags, explaining warnings, and a re-aggregated
+// global verdict — a quarantined REQUIRED device breaks ok (conscious
+// decision: health-only monitoring must see the uncertainty, not just the
+// 409 a refused write receives). Runs where snapshots are built, so HTTP,
+// MQTT and change events all carry the same picture.
+func (s *Snapshot) ApplyQuarantine(quarantined map[string]time.Time) {
+	if len(quarantined) == 0 {
+		return
+	}
+	any := false
+	for i := range s.Devices {
+		d := &s.Devices[i]
+		since, ok := quarantined[d.ID]
+		if !ok {
+			continue
+		}
+		d.Quarantined = true
+		any = true
+		s.Warnings = append(s.Warnings, fmt.Sprintf(
+			"device %s is quarantined since %s: an earlier transition could not be verified as cleaned up; writes are refused until the device is verified quiescent",
+			d.ID, since.UTC().Format(time.RFC3339)))
+	}
+	if !any {
+		return
+	}
+	// A quarantine breaks ok regardless of Optional: it is a control-plane
+	// problem (writes refused), not a device absence to excuse.
+	s.OK = false
+	if s.Health == HealthHealthy || s.Health == HealthIdle {
+		s.Health = HealthDegraded
 	}
 }
 

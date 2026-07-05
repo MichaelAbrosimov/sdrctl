@@ -195,6 +195,35 @@ services:
 	}
 }
 
+// Pack-5 review: a second YAML document would be decoded into nowhere —
+// reject it instead of silently ignoring everything after '---'.
+func TestRejectsMultiDocumentYAML(t *testing.T) {
+	if _, err := Load(writeConfig(t, `
+services:
+  rtl-tcp: {systemd: x.service}
+---
+mode_set_timeout_sec: 20
+`)); err == nil {
+		t.Error("second YAML document in config accepted silently")
+	}
+
+	cfgPath := writeConfig(t, `
+services:
+  rtl-tcp: {systemd: x.service}
+`)
+	secrets := filepath.Join(filepath.Dir(cfgPath), "secrets.yaml")
+	if err := os.WriteFile(secrets, []byte("api:\n  token: a\n---\nmqtt:\n  password: b\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.LoadSecrets(); err == nil {
+		t.Error("second YAML document in secrets accepted silently")
+	}
+}
+
 func TestMissingFileUsesDefaults(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
 	if err != nil {

@@ -79,6 +79,11 @@ func (o *Observer) Refresh() core.Snapshot {
 	ctx, cancel := context.WithTimeout(context.Background(), o.cfg.ModeSetTimeout())
 	defer cancel()
 	cur := o.build(ctx, o.cfg, o.sd)
+	// Coordinator state the builder cannot know. Applied HERE, where every
+	// snapshot is born, so HTTP /status, MQTT retained topics and change
+	// events all see the quarantine — and entering/leaving one IS a
+	// snapshot change that fires notifications.
+	cur.ApplyQuarantine(o.coord.QuarantinedSince())
 
 	o.mu.Lock()
 	prev, had := o.last, o.haveLast

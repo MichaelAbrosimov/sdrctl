@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,7 +11,51 @@ import (
 	"github.com/MichaelAbrosimov/sdrctl/internal/config"
 	"github.com/MichaelAbrosimov/sdrctl/internal/core"
 	"github.com/MichaelAbrosimov/sdrctl/internal/systemd"
+	"github.com/MichaelAbrosimov/sdrctl/internal/systemd/systemdtest"
 )
+
+// Pack-5 review: quarantine state is merged into snapshots at BUILD time,
+// so the payload MQTT publishes (raw observer snapshots) carries it, and
+// entering a quarantine is itself a snapshot change that fires onChange.
+func TestRefreshCarriesQuarantine(t *testing.T) {
+	f := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "inactive", Enabled: "disabled"},
+	})
+	coord := NewCoordinator()
+	obs := New(coordTestConfig(), f.Client(), coord)
+
+	notified := 0
+	obs.OnChange(func(prev, cur core.Snapshot) { notified++ })
+
+	before := obs.Refresh()
+	for _, d := range before.Devices {
+		if d.Quarantined {
+			t.Fatal("device quarantined before anything happened")
+		}
+	}
+
+	coord.Quarantine("rtl-sdr-01")
+	after := obs.Refresh()
+
+	if len(after.Devices) == 0 || !after.Devices[0].Quarantined {
+		t.Error("snapshot does not carry the quarantine flag")
+	}
+	if after.OK {
+		t.Error("quarantined device left ok=true")
+	}
+	found := false
+	for _, w := range after.Warnings {
+		if strings.Contains(w, "rtl-sdr-01 is quarantined") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no explaining warning in snapshot: %v", after.Warnings)
+	}
+	if notified == 0 {
+		t.Error("entering quarantine did not fire a change notification (MQTT event path)")
+	}
+}
 
 // SDR-P2-02: the whole refresh cycle is serialized — concurrent refreshes
 // must never overlap, and listeners must see snapshots in storage order

@@ -112,6 +112,12 @@ func TestStatusExposesQuarantine(t *testing.T) {
 	if !found {
 		t.Errorf("quarantine not surfaced in /status warnings: %v", snap.Warnings)
 	}
+	if snap.OK {
+		t.Error("quarantine left /status ok=true — health-only monitoring would miss it")
+	}
+	if len(snap.Devices) == 0 || !snap.Devices[0].Quarantined {
+		t.Error("quarantined flag missing on the device in /status")
+	}
 }
 
 func TestSocketWriteNeedsNoToken(t *testing.T) {

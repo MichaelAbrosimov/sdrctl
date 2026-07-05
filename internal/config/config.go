@@ -187,6 +187,9 @@ func Load(path string) (*Config, error) {
 		if err := dec.Decode(cfg); err != nil && !errors.Is(err, io.EOF) {
 			return nil, fmt.Errorf("parse config %s: %w", path, err)
 		}
+		if err := requireSingleDocument(dec); err != nil {
+			return nil, fmt.Errorf("config %s: %w", path, err)
+		}
 		cfg.Loaded = true
 	}
 
@@ -200,6 +203,18 @@ func Load(path string) (*Config, error) {
 		cfg.secretFiles = append(cfg.secretFiles, src)
 	}
 	return cfg, nil
+}
+
+// requireSingleDocument rejects a second YAML document: everything after a
+// `---` separator would be decoded into nowhere and silently ignored —
+// exactly the class of quiet misconfiguration strict parsing exists to
+// prevent.
+func requireSingleDocument(dec *yaml.Decoder) error {
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("unexpected second YAML document — everything after '---' would be silently ignored")
+	}
+	return nil
 }
 
 // SecretsPath is the agent-only overlay next to the main config file.
@@ -237,6 +252,9 @@ func (c *Config) LoadSecrets() error {
 	dec.KnownFields(true)
 	if err := dec.Decode(&s); err != nil && !errors.Is(err, io.EOF) {
 		return fmt.Errorf("parse secrets %s: %w", path, err)
+	}
+	if err := requireSingleDocument(dec); err != nil {
+		return fmt.Errorf("secrets %s: %w", path, err)
 	}
 
 	if s.API.Token != "" {
