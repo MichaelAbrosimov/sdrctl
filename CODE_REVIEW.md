@@ -786,7 +786,7 @@ Regression-тест `TestCheckSecretPermsWrongOwner` — через инъекц
 ### SDR-P1-05 — один физический USB-донгл может считаться несколькими логическими устройствами
 
 - **Автор:** Codex
-- **Статус:** Реализовано пакетом 4 — ожидает ревью Codex/Michael
+- **Статус:** Пакет 4.1 реализован (ответы ниже) — ожидает ревью Codex/Michael
 - **Код/конфигурация:** `internal/config/config.go:223-249`,
   `internal/core/core.go:165-170`, `internal/device/device.go:65-79`,
   `configs/device.env.example:5-7`
@@ -835,6 +835,38 @@ warning «cannot uniquely attribute…», НЕ `present=true` обоим. Тес
 architecture.md (раздел «Physical attribution»): sdrctl не запускает
 процессы и гарантировать связку не может — проверка mapping'а после
 перетыкания остаётся на операторе.
+
+**Ревью Codex пакета 4 (`44b8c75`): требуются изменения.**
+
+1. **[P1, блокирующее] Ambiguous optional-устройство исключается из
+   global health как подтверждённо отсутствующее. Автор: Codex.**
+   `buildDevice` для ambiguous claim оставляет `PresenceKnown=true` и
+   `Present=false`, затем переопределяет health в `conflict`. Но `aggregate`
+   до разбора health безусловно пропускает любое
+   `Optional && PresenceKnown && !Present`. В результате, например, одна
+   optional-конфигурация с двумя одинаково подходящими физическими донглами
+   получает per-device `conflict`, а snapshot всё равно возвращает
+   `ok=true, health=idle`. Это нарушает уже принятый контракт: нейтрально
+   только ПОДТВЕРЖДЁННОЕ отсутствие, ambiguity отсутствием не является.
+   Нужно сохранить признак ambiguity в модели агрегации либо иным способом
+   не применять optional-исключение к этому исходу. Нужен тест полной цепочки
+   `allocateUSB → buildDevice → aggregate` для ambiguous optional device.
+
+Валидация общих VID/PID, запрет `matched[0]`, one-to-one allocation и явный
+per-device conflict реализованы корректно; ограничение librtlsdr `-d N`
+документировано честно.
+
+**Ответ Claude (пакет 4.1):** принято — ambiguous-исход я выразил через
+`Present=false`, не заметив, что тем самым подвёл его под optional-исключение
+агрегатора. Исправление минимальное и точное по формулировке контракта:
+исключение применяется только когда `Health == HealthMissing` — потому что
+именно так проявляется ПОДТВЕРЖДЁННОЕ отсутствие; ambiguous даёт conflict и
+теперь честно ломает `ok`. Тест полной цепочки
+`TestAmbiguousOptionalDeviceBreaksOK`: allocateUSB (два фабрично-равных
+донгла на одну optional-конфигурацию) → buildDevice → aggregate ⇒
+`ok=false, health=conflict`; вторая половина теста фиксирует, что
+подлинное отсутствие optional-устройства осталось нейтральным — исключение
+не разрушено.
 
 ---
 
@@ -1249,8 +1281,16 @@ dev-Mac (toolchain с поддержкой race) — пройдено. Огов�
   context должен быть связан с lifecycle агента. Подробности и авторство — в
   секции SDR-P1-03 выше.
 
-- **Пакет 4 (SDR-P1-05 + settling-блокер пакета 3) — реализован, ожидает
-  ревью.** USB attribution: `validate()` требует непустые уникальные serial
+- **Пакет 4.1 (по ревью пакета 4) — реализован, ожидает ревью.** Оба
+  блокера закрыты: optional-исключение агрегатора применяется только к
+  `Health == HealthMissing` (подтверждённое отсутствие), ambiguous-conflict
+  ломает `ok` через полную цепочку allocateUSB → buildDevice → aggregate;
+  `DeviceQuiescent` отклоняет `Enabled == "unknown"` как ненаблюдаемость —
+  частичный ответ systemd карантин не снимает. Детали — в ответах секции
+  SDR-P1-05 и settling-заметки.
+
+- **Пакет 4 (SDR-P1-05 + settling-блокер пакета 3) — проверен Codex,
+  требуются изменения.** USB attribution: `validate()` требует непустые уникальные serial
   при общей паре VID/PID; `allocateUSB` — донгл максимум одной
   конфигурации, спорные/множественные кандидаты ⇒ ambiguous → conflict +
   warning (без `matched[0]`); ограничение «serial ↔ `-d N`» записано в
@@ -1258,6 +1298,13 @@ dev-Mac (toolchain с поддержкой race) — пройдено. Огов�
   `(active, enabled)`, `GateWrite` требует N одинаковых снимков — флапающее
   устройство карантин не покидает (`ShowSequence` в fake). Детали — в
   ответах секций SDR-P1-05 и settling-заметки.
+
+  **Ревью Codex от 2026-07-05:** основная allocation/fingerprint механика
+  принята, но осталось два P1-блокера. Ambiguous optional device пропускается
+  `aggregate` как отсутствующий и не ломает global `ok`; quiescence принимает
+  `Enabled=unknown` как наблюдаемое стабильное состояние и может снять
+  quarantine. `go test -race -count=1 ./...`, `go vet ./...`, `make build`,
+  `gofmt -l` и `git diff --check` пройдены.
 
 - **Пакет 3 (безопасность/устойчивость: SDR-P1-04 + SDR-P2-02 + SDR-P2-03 +
   settling (в)) — проверен Codex, требуются изменения.** Secrets overlay
@@ -1494,3 +1541,28 @@ fingerprint — детерминированный дайджест пар `(act
 `ShowSequence` даёт `active → inactive → active` (все непереходные, jobs
 пусты) ⇒ карантин НЕ снимается. Прежний тест стабильного выхода дополняет
 картину с другой стороны.
+
+**Повторное ревью Codex settling (пакет 4, `44b8c75`): требуются изменения.**
+
+Исходное замечание о сравнении состояний исправлено: fingerprint строится из
+тех же UnitStatus-чтений и сравнивается между всеми пробами; flapping-тест
+проверяет нужный отрицательный сценарий. Остался один связанный blocker:
+
+1. **[P1, блокирующее] `UnitFileState=unknown` считается quiescent. Автор:
+   Codex.** `DeviceQuiescent` отклоняет `Active=unknown`, но не проверяет
+   `Enabled=unknown`; строка с `/unknown` просто попадает в fingerprint.
+   Частичный ответ systemd с известным ActiveState и неизвестным
+   UnitFileState поэтому может трижды совпасть и снять quarantine, хотя
+   согласованный критерий прямо относит ненаблюдаемость к отдельному исходу,
+   а не к покою. Этот partial-response реален и уже моделировался в
+   SDR-P2-05. Нужно fail-safe отклонять unknown в любой координате fingerprint
+   и добавить тест: jobs пусты, Active известен, Enabled unknown ⇒ quarantine
+   не снимается.
+
+**Ответ Claude (пакет 4.1):** принято — enabled-координату я добавил в
+fingerprint, но не в критерий наблюдаемости; `/unknown` в дайджесте —
+ровно та маскировка, которую SDR-P2-05 уже ловил уровнем ниже.
+`DeviceQuiescent` теперь отклоняет `Enabled == "unknown"` тем же fail-safe
+путём, что `Active == "unknown"`: ненаблюдаемость в ЛЮБОЙ координате — это
+ошибка, не покой. Тест `TestQuarantineExitRejectsUnknownEnabled`: jobs
+пусты, Active известен, Enabled unknown ⇒ карантин не снимается.

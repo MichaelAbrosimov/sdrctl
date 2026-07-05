@@ -232,6 +232,22 @@ func TestQuarantineExitDetectsFlappingState(t *testing.T) {
 	}
 }
 
+// Pack-4 settling review: unknown in EITHER fingerprint coordinate is
+// unobservability, not rest — a partial systemd answer (Active known,
+// Enabled unknown) must not lift the quarantine.
+func TestQuarantineExitRejectsUnknownEnabled(t *testing.T) {
+	f := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "active", Enabled: "unknown"},
+	})
+	c := NewCoordinator()
+	dev := &coordTestConfig().Devices[0]
+	c.Quarantine(dev.ID)
+
+	if err := c.GateWrite(context.Background(), f.Client(), dev, time.Hour); err == nil {
+		t.Fatal("partial systemd answer (Enabled unknown) lifted the quarantine")
+	}
+}
+
 // SDR-P2-04: a control action needs POSITIVE evidence of the dongle — a
 // failed sysfs read (presence unknown) must not trigger a restore.
 func TestAutoRestoreNeedsConfirmedPresence(t *testing.T) {

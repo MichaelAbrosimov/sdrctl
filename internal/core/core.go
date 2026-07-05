@@ -299,8 +299,12 @@ func aggregate(devices []DeviceStatus) (bool, string) {
 	anyConflict := false
 	anyUnknown := false
 	for _, d := range devices {
-		if d.Optional && d.PresenceKnown && !d.Present {
-			continue // confirmed-absent optional devices never break global health
+		// Only CONFIRMED absence is neutral for optional devices — and
+		// confirmed absence manifests as HealthMissing. An ambiguous
+		// attribution also reports !Present, but its health is conflict:
+		// that is a problem to surface, not an absence to excuse.
+		if d.Optional && d.PresenceKnown && !d.Present && d.Health == HealthMissing {
+			continue
 		}
 		switch d.Health {
 		case HealthHealthy:
@@ -555,6 +559,11 @@ func DeviceQuiescent(ctx context.Context, sd *systemd.Client, dev *config.Device
 			return false, "", nil
 		case "unknown":
 			return false, "", fmt.Errorf("unit %s state is unobservable", sc.Systemd)
+		}
+		// Unknown in EITHER fingerprint coordinate is unobservability, not
+		// rest: a partial systemd answer must never certify quiescence.
+		if st.Enabled == "unknown" {
+			return false, "", fmt.Errorf("unit %s enabled state is unobservable", sc.Systemd)
 		}
 		parts = append(parts, sc.Systemd+"="+st.Active+"/"+st.Enabled)
 	}

@@ -234,6 +234,52 @@ func TestAllocateUSB(t *testing.T) {
 	}
 }
 
+// SDR-P1-05 (pack 4 review): an ambiguous OPTIONAL device must break
+// global ok through the full allocateUSB → buildDevice → aggregate chain —
+// the optional exception excuses confirmed absence, not ambiguity.
+func TestAmbiguousOptionalDeviceBreaksOK(t *testing.T) {
+	dc := config.DeviceConfig{
+		ID: "rtl-sdr-01", Optional: true,
+		USBVendorID: "0bda", USBProductID: "2838", Serial: "S1",
+		Services: map[string]config.ServiceConfig{
+			"rtl-tcp": {Systemd: "rtl-tcp.service"},
+		},
+	}
+	// Two factory-equal dongles both match the single configuration.
+	usb := []device.USBDevice{
+		{SysName: "1-1", VendorID: "0bda", ProductID: "2838", Serial: "S1"},
+		{SysName: "1-2", VendorID: "0bda", ProductID: "2838", Serial: "S1"},
+	}
+	claims := allocateUSB([]config.DeviceConfig{dc}, usb)
+	if !claims[0].ambiguous {
+		t.Fatal("two equal candidates must be ambiguous")
+	}
+
+	f := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "inactive", Enabled: "disabled"},
+	})
+	ds := buildDevice(context.Background(), dc, f.Client(), claims[0], true)
+	if ds.Health != HealthConflict {
+		t.Fatalf("ambiguous device health = %s, want conflict", ds.Health)
+	}
+
+	ok, health := aggregate([]DeviceStatus{ds})
+	if ok || health != HealthConflict {
+		t.Errorf("ambiguous optional device produced ok=%v health=%s; want false/conflict", ok, health)
+	}
+
+	// Genuinely absent optional device stays neutral — the exception the
+	// fix must NOT destroy.
+	claimsAbsent := allocateUSB([]config.DeviceConfig{dc}, nil)
+	dsAbsent := buildDevice(context.Background(), dc, f.Client(), claimsAbsent[0], true)
+	if dsAbsent.Health != HealthMissing {
+		t.Fatalf("absent device health = %s, want missing", dsAbsent.Health)
+	}
+	if ok, health := aggregate([]DeviceStatus{dsAbsent}); !ok || health != HealthIdle {
+		t.Errorf("confirmed-absent optional device broke ok: ok=%v health=%s", ok, health)
+	}
+}
+
 // SDR-P1-01 end to end: with systemd unobservable the snapshot must say so
 // instead of reporting a healthy idle node to the orchestrator.
 func TestSnapshotUnknownWhenSystemdUnobservable(t *testing.T) {
