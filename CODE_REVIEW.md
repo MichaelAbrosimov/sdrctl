@@ -786,7 +786,7 @@ Regression-тест `TestCheckSecretPermsWrongOwner` — через инъекц
 ### SDR-P1-05 — один физический USB-донгл может считаться несколькими логическими устройствами
 
 - **Автор:** Codex
-- **Статус:** Пакет 4.1 реализован (ответы ниже) — ожидает ревью Codex/Michael
+- **Статус:** Исправление принято Codex (`4aabc05`), ожидает подтверждения Michael
 - **Код/конфигурация:** `internal/config/config.go:223-249`,
   `internal/core/core.go:165-170`, `internal/device/device.go:65-79`,
   `configs/device.env.example:5-7`
@@ -867,6 +867,16 @@ per-device conflict реализованы корректно; ограниче�
 `ok=false, health=conflict`; вторая половина теста фиксирует, что
 подлинное отсутствие optional-устройства осталось нейтральным — исключение
 не разрушено.
+
+**Повторное ревью Codex пакета 4.1 (`4aabc05`): принято.**
+
+- **Автор ревью:** Codex.
+- Optional-исключение применяется только к `HealthMissing`; ambiguous claim
+  сохраняет `HealthConflict` и теперь участвует в global aggregation.
+- Full-chain regression test проверяет и ambiguous-сценарий, и сохранение
+  нейтральности подтверждённого отсутствия.
+
+Блокирующих замечаний по SDR-P1-05 больше нет.
 
 ---
 
@@ -1281,7 +1291,7 @@ dev-Mac (toolchain с поддержкой race) — пройдено. Огов�
   context должен быть связан с lifecycle агента. Подробности и авторство — в
   секции SDR-P1-03 выше.
 
-- **Пакет 4.1 (по ревью пакета 4) — реализован, ожидает ревью.** Оба
+- **Пакет 4.1 (по ревью пакета 4) — принят Codex (`4aabc05`).** Оба
   блокера закрыты: optional-исключение агрегатора применяется только к
   `Health == HealthMissing` (подтверждённое отсутствие), ambiguous-conflict
   ломает `ok` через полную цепочку allocateUSB → buildDevice → aggregate;
@@ -1289,8 +1299,13 @@ dev-Mac (toolchain с поддержкой race) — пройдено. Огов�
   частичный ответ systemd карантин не снимает. Детали — в ответах секции
   SDR-P1-05 и settling-заметки.
 
-- **Пакет 4 (SDR-P1-05 + settling-блокер пакета 3) — проверен Codex,
-  требуются изменения.** USB attribution: `validate()` требует непустые уникальные serial
+  **Повторное ревью Codex от 2026-07-05:** оба блокера закрыты без новых
+  замечаний; пакет 4 и settling-часть пакета 3 приняты. `go test -race
+  -count=1 ./...`, `go vet ./...`, `make build`, `gofmt -l` и
+  `git diff --check` пройдены.
+
+- **Пакет 4 (SDR-P1-05 + settling-блокер пакета 3) — принят Codex после
+  пакета 4.1.** USB attribution: `validate()` требует непустые уникальные serial
   при общей паре VID/PID; `allocateUSB` — донгл максимум одной
   конфигурации, спорные/множественные кандидаты ⇒ ambiguous → conflict +
   warning (без `matched[0]`); ограничение «serial ↔ `-d N`» записано в
@@ -1307,7 +1322,7 @@ dev-Mac (toolchain с поддержкой race) — пройдено. Огов�
   `gofmt -l` и `git diff --check` пройдены.
 
 - **Пакет 3 (безопасность/устойчивость: SDR-P1-04 + SDR-P2-02 + SDR-P2-03 +
-  settling (в)) — проверен Codex, требуются изменения.** Secrets overlay
+  settling (в)) — принят Codex после пакетов 3.1/4/4.1.** Secrets overlay
   `secrets.yaml` + отказ агента при читаемом шире владельца файле с
   активным секретом (`LoadSecrets`/`CheckSecretPerms`, миграция токена на
   узле обязательна); `socketAlive` — dial-проверка перед удалением сокета,
@@ -1566,3 +1581,13 @@ fingerprint, но не в критерий наблюдаемости; `/unknown
 путём, что `Active == "unknown"`: ненаблюдаемость в ЛЮБОЙ координате — это
 ошибка, не покой. Тест `TestQuarantineExitRejectsUnknownEnabled`: jobs
 пусты, Active известен, Enabled unknown ⇒ карантин не снимается.
+
+**Повторное ревью Codex settling (пакет 4.1, `4aabc05`): принято.**
+
+- **Автор ревью:** Codex.
+- Unknown отклоняется в обеих координатах fingerprint; частичный ответ
+  systemd не может подтвердить quiescence.
+- Тест проверяет полный gate-path и доказывает, что quarantine не снимается
+  при известном ActiveState и неизвестном UnitFileState.
+
+Блокирующих замечаний по settling-критерию больше нет.
