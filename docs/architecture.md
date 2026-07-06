@@ -116,6 +116,12 @@ someone restarts the service. The udev `BindsTo` binding (see
 recovery, not an optional refinement: it makes systemd stop the unit on
 unplug, which turns the lie into an honest `missing`/`degraded` that
 auto_restore acts on. sdrctl deliberately does not probe the data plane.
+Pair the binding with `TimeoutStopSec=5` in the same drop-in: the
+dead-handle rtl_tcp ignores SIGTERM too, so the BindsTo stop would drain
+for the default 90 s until SIGKILL — replug recovery waits exactly that
+long (measured: ~1m50s end to end; with the short stop timeout it is
+seconds). The observer skips restore attempts while the stop drains, so
+those ticks cost nothing.
 
 ## Async write API
 

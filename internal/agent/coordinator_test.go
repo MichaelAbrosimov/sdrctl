@@ -265,6 +265,44 @@ func TestQuarantineExitRejectsUnknownEnabled(t *testing.T) {
 	}
 }
 
+// Field finding (wyse-sdr replug test): while a stop of a SIGTERM-immune
+// process drains towards SIGKILL, an enable would only queue behind the
+// stop job and burn the transition timeout. The restore must skip such
+// ticks quietly — per attempt, WITHOUT charging the cooldown — and act on
+// the first tick after the unit settles.
+func TestAutoRestoreSkipsWhileStopDrains(t *testing.T) {
+	f := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "inactive", Enabled: "enabled"},
+	})
+	cfg := coordTestConfig()
+	coord := NewCoordinator()
+	obs := New(cfg, f.Client(), coord)
+
+	// The device is already trusted in this process (past the once-per-
+	// process gate) — the tactical check must catch the draining stop.
+	if err := coord.GateWrite(context.Background(), f.Client(), &cfg.Devices[0], time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	f.SetUnit("rtl-tcp.service", systemdtest.Unit{Load: "loaded", Active: "deactivating", Enabled: "enabled"})
+	before := len(f.Calls())
+	obs.autoRestore(context.Background(), degradedSnapshot())
+	if mutated(f.Calls()[before:]) {
+		t.Errorf("restore queued a mutation behind a draining stop:\n%s",
+			strings.Join(f.Calls()[before:], "\n"))
+	}
+	if len(obs.lastRestore) != 0 {
+		t.Error("skipped attempt charged the cooldown — the next tick would not retry for free")
+	}
+
+	// The stop resolved; the very next tick must restore.
+	f.SetUnit("rtl-tcp.service", systemdtest.Unit{Load: "loaded", Active: "inactive", Enabled: "enabled"})
+	obs.autoRestore(context.Background(), degradedSnapshot())
+	if u := f.Unit("rtl-tcp.service"); u.Active != "active" {
+		t.Errorf("restore did not act once the unit settled: %+v", u)
+	}
+}
+
 // SDR-P2-04: a control action needs POSITIVE evidence of the dongle — a
 // failed sysfs read (presence unknown) must not trigger a restore.
 func TestAutoRestoreNeedsConfirmedPresence(t *testing.T) {

@@ -168,6 +168,16 @@ func (o *Observer) restoreDevice(ctx context.Context, dev *config.DeviceConfig) 
 		return
 	}
 
+	// Tactical per-attempt check, separate from the once-per-process trust
+	// gate above: while a pending job or a transitional state exists —
+	// e.g. the BindsTo stop of a SIGTERM-immune rtl_tcp draining towards
+	// SIGKILL — an enable would just queue behind it and burn the whole
+	// transition timeout (seen live on wyse-sdr, 2026-07-06). Skip quietly;
+	// the cooldown is NOT charged, the next tick retries for free.
+	if quiet, _, err := core.DeviceQuiescent(opCtx, o.sd, dev); err != nil || !quiet {
+		return
+	}
+
 	// Re-read under the guard: the snapshot that nominated this device may
 	// predate a manual transition that already changed the desired mode.
 	actual, desired := core.DeviceModes(opCtx, o.sd, dev)

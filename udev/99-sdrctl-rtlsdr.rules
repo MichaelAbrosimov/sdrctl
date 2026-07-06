@@ -27,6 +27,12 @@
 #   [Unit]
 #   BindsTo=sys-subsystem-usb-devices-rtl\x2dsdr\x2d01.device
 #   After=sys-subsystem-usb-devices-rtl\x2dsdr\x2d01.device
+#   [Service]
+#   # rtl_tcp with a dead USB handle ignores SIGTERM (field-verified): the
+#   # BindsTo stop would otherwise hang for the default 90s until SIGKILL,
+#   # and replug recovery waits it out. A graceful exit is impossible in
+#   # that state anyway — kill fast.
+#   TimeoutStopSec=5
 #
 # Side effect worth wanting: booting without the dongle no longer produces a
 # crash-retry loop — the unit simply waits for its device.
@@ -40,6 +46,8 @@
 #   [Unit]
 #   BindsTo=sys-subsystem-usb-devices-rtl\x2dsdr\x2d01.device
 #   After=sys-subsystem-usb-devices-rtl\x2dsdr\x2d01.device
+#   [Service]
+#   TimeoutStopSec=5
 #
 # --- Apply -----------------------------------------------------------------
 #   udevadm control --reload && udevadm trigger
