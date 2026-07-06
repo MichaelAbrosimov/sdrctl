@@ -48,6 +48,12 @@ systemctl enable --now sdrctl-agent
 `rtl-433.service` / `spyserver.service` are optional; while absent they show
 as `not-installed` and break nothing.
 
+**Stop-on-unplug binding (required for hands-off replug recovery):** install
+the udev rule and the `BindsTo` drop-in from `udev/99-sdrctl-rtlsdr.rules`
+(single-device variant). Without it `rtl_tcp` survives an unplug with the
+unit still `active`, sdrctl truthfully reports what systemd sees (`healthy`),
+and the dead stream never resumes on its own — verified in the field.
+
 ## 4. No-sudo CLI for the operator user
 
 Primary path (v0.2): the CLI talks to the agent over

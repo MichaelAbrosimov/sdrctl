@@ -1,22 +1,47 @@
-# Optional refinement: bind SDR service instances to the physical dongle so
-# systemd stops them immediately on unplug instead of letting the process
-# crash into a Restart loop.
+# REQUIRED for auto-resume after replug: bind SDR services to the physical
+# dongle so systemd STOPS them the moment it disappears.
 #
-# Even WITHOUT these rules the node behaves correctly: on unplug the service
-# crashes, systemd retries (Restart=/StartLimit*), the unit ends up "failed",
-# sdrctl reports the device as degraded/missing, and after re-plug the agent's
-# auto_restore brings the desired mode back.
+# Field finding (wyse-sdr, 2026-07-06): the earlier assumption "on unplug
+# the service crashes and ends up failed" is WRONG for rtl_tcp. Without an
+# active client it survives the unplug, keeps the unit `active` while
+# spamming LIBUSB_ERROR_NO_DEVICE, and after replug holds the dead USB
+# handle forever. systemd — and therefore sdrctl's state model — sees a
+# healthy service with a dead stream, so auto_restore rightly does nothing.
+# Only this binding makes systemd's truth match physical reality:
+#   unplug → device unit gone → BindsTo stops the service → sdrctl reports
+#   missing; replug → device present, mode degraded → auto_restore brings
+#   the desired mode back (≤ observer tick + cooldown).
 #
 # Recovery on re-plug is deliberately NOT done via ENV{SYSTEMD_WANTS}: a
 # device-Wants would start the service even when the desired mode is idle.
 #
-# 1) Tag the dongle (one rule per device, adjust the serial):
-# SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2838", ATTRS{serial}=="00000001", TAG+="systemd", ENV{SYSTEMD_ALIAS}="/sys/subsystem/usb/devices/rtl-sdr-01"
+# --- Single-device node (one dongle, plain rtl-tcp.service) ---------------
+# Match WITHOUT serial: factory serials are all 00000001, and a rule pinned
+# to a serial silently stops matching after an rtl_eeprom reflash — a quiet
+# loss of the binding is worse. With one dongle vendor+product is unique.
 #
-# 2) Add a drop-in for the matching service instance,
-#    /etc/systemd/system/rtl-tcp@rtl-sdr-01.service.d/bind.conf:
-#      [Unit]
-#      BindsTo=sys-subsystem-usb-devices-rtl\x2dsdr\x2d01.device
-#      After=sys-subsystem-usb-devices-rtl\x2dsdr\x2d01.device
+# /etc/udev/rules.d/99-sdrctl-rtlsdr.rules:
+#   SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0bda", ATTR{idProduct}=="2838", TAG+="systemd", ENV{SYSTEMD_ALIAS}="/sys/subsystem/usb/devices/rtl-sdr-01"
 #
-# 3) Reload: udevadm control --reload && systemctl daemon-reload
+# /etc/systemd/system/rtl-tcp.service.d/bind.conf:
+#   [Unit]
+#   BindsTo=sys-subsystem-usb-devices-rtl\x2dsdr\x2d01.device
+#   After=sys-subsystem-usb-devices-rtl\x2dsdr\x2d01.device
+#
+# Side effect worth wanting: booting without the dongle no longer produces a
+# crash-retry loop — the unit simply waits for its device.
+#
+# --- Multi-device node (template units) -----------------------------------
+# One rule per dongle, serial-scoped (multi-device already REQUIRES unique
+# serials — config validation enforces it):
+#   SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0bda", ATTR{idProduct}=="2838", ATTR{serial}=="00000001", TAG+="systemd", ENV{SYSTEMD_ALIAS}="/sys/subsystem/usb/devices/rtl-sdr-01"
+#
+# Drop-in per instance, /etc/systemd/system/rtl-tcp@rtl-sdr-01.service.d/bind.conf:
+#   [Unit]
+#   BindsTo=sys-subsystem-usb-devices-rtl\x2dsdr\x2d01.device
+#   After=sys-subsystem-usb-devices-rtl\x2dsdr\x2d01.device
+#
+# --- Apply -----------------------------------------------------------------
+#   udevadm control --reload && udevadm trigger
+#   systemctl daemon-reload && systemctl restart <sdr unit>
+#   systemctl status 'sys-subsystem-usb-devices-rtl\x2dsdr\x2d01.device'  # must be active

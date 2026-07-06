@@ -102,10 +102,20 @@ honest.
 `sdrctl agent` polls state every `observer.interval_sec`, publishes changes
 (MQTT) and serves snapshots (HTTP). It performs exactly one corrective action
 — `auto_restore`: if a unit is enabled (desired), its dongle is present, but
-the unit is inactive/failed (typically after re-plug exhausted StartLimit),
-the agent does `reset-failed` + `restart`, at most once per device per 30 s.
-Everything else — restarts, mutual exclusion, stop-on-unplug — is systemd's
-job, declared in unit files (see `systemd/` and `udev/`).
+the unit is not running, the agent re-runs the shared transition primitive
+(`core.SetMode` with the fresh desired mode), at most once per device per
+cooldown. Everything else — restarts, mutual exclusion, stop-on-unplug — is
+systemd's job, declared in unit files (see `systemd/` and `udev/`).
+
+Known limitation (observed on wyse-sdr, 2026-07-06): the state model trusts
+systemd, and a process can lie to systemd. `rtl_tcp` without a connected
+client SURVIVES a dongle unplug — the unit stays `active`, sdrctl reports
+`healthy`, auto_restore correctly does nothing, and the stream is dead until
+someone restarts the service. The udev `BindsTo` binding (see
+`udev/99-sdrctl-rtlsdr.rules`) is therefore REQUIRED for hands-off replug
+recovery, not an optional refinement: it makes systemd stop the unit on
+unplug, which turns the lie into an honest `missing`/`degraded` that
+auto_restore acts on. sdrctl deliberately does not probe the data plane.
 
 ## Async write API
 
