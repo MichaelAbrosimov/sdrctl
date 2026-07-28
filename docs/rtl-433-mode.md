@@ -84,6 +84,23 @@ are retained, and `log_type` excludes `publish`/`subscribe`, so the broker
 log does not grow with traffic. No maintenance needed as long as retain
 stays off.
 
+### The `$SYS` tree
+
+The broker publishes its own statistics under `$SYS/broker/…`, refreshed
+every `sys_interval` (10 s by default). It is not data and not garbage —
+and it explains two things that look confusing:
+
+- A client shows `$SYS` next to `rtl_433` in the root only because it
+  subscribes to it explicitly: an MQTT `#` wildcard does not match `$SYS`.
+- Those topics ARE retained, and on this node they are the *only* retained
+  messages (51 topics, ~237 bytes) — i.e. the entire content of
+  `mosquitto.db`. Another confirmation that sensor data persists nowhere.
+
+Cleaning it is pointless (the broker regenerates it); hide it in the client
+or disable it with `sys_interval 0`. Worth keeping: `load/messages/*` is a
+free early warning — a protocol that starts false-triggering shows up as a
+rate spike here before the noise is noticeable in the data.
+
 This is a separate channel from sdrctl's own telemetry (`sdr/<node>/#`,
 `mqtt.enabled` in the agent config) — the prefixes do not collide, and both
 can share one broker.
