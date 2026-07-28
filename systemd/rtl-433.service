@@ -1,0 +1,27 @@
+# rtl_433 ISM-band decoder mode (deploy-time example).
+# Install: apt install rtl-433 && cp systemd/rtl-433.service /etc/systemd/system/
+#
+# Same mode semantics as rtl-tcp.service: Conflicts= keeps one dongle in one
+# mode, enabled = desired, sdrctl only flips units. Pair with the BindsTo
+# drop-in from udev/99-sdrctl-rtlsdr.rules like every SDR unit.
+[Unit]
+Description=rtl_433 ISM-band decoder
+After=network-online.target
+Wants=network-online.target
+Conflicts=rtl-tcp.service spyserver.service
+StartLimitBurst=3
+StartLimitIntervalSec=120
+
+[Service]
+Type=simple
+# Defaults decode the common 433.92 MHz protocols to the journal. Override
+# without editing the unit via /etc/sdrctl/rtl-433.env, e.g.
+#   RTL433_ARGS=-f 868.3M -F json    (or -F mqtt://... once the broker is up)
+Environment=RTL433_ARGS=
+EnvironmentFile=-/etc/sdrctl/rtl-433.env
+ExecStart=/usr/bin/rtl_433 $RTL433_ARGS
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
