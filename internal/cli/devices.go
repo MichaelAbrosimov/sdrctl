@@ -56,7 +56,7 @@ var deviceCmd = &cobra.Command{
   sdrctl device rtl-sdr-01 status
   sdrctl device rtl-sdr-01 logs
   sdrctl device rtl-sdr-01 mode
-  sdrctl device rtl-sdr-01 mode set rtl-tcp`,
+  sdrctl device rtl-sdr-01 mode rtl-tcp        (same as: mode set rtl-tcp)`,
 	Args: cobra.ArbitraryArgs,
 	RunE: deviceDispatch,
 }
@@ -94,6 +94,9 @@ func deviceDispatch(cmd *cobra.Command, args []string) error {
 		return printMode(cfg, dev)
 	case rest[0] == "mode" && len(rest) == 3 && rest[1] == "set":
 		return runModeSet(cfg, dev, rest[2])
+	case rest[0] == "mode" && len(rest) == 2:
+		// Same shorthand as the top-level command: `device <id> mode <name>`.
+		return runModeSet(cfg, dev, rest[1])
 	default:
 		return fmt.Errorf("unknown device subcommand %q", strings.Join(rest, " "))
 	}
@@ -166,6 +169,11 @@ func printDeviceDetail(cfg *config.Config, dev *config.DeviceConfig) error {
 
 	if ds.Mode != core.ModeIdle && ds.Mode != core.ModeUnknown && ds.Mode != core.ModeConflict {
 		if si, ok := ds.ServiceInfo[ds.Mode]; ok {
+			// What the process is REALLY running with — unit files hide
+			// this behind $VARS from an EnvironmentFile.
+			if si.CmdLine != "" {
+				fmt.Printf("\nRunning:  %s\n", si.CmdLine)
+			}
 			fmt.Printf("\nnote: dongle is busy (%s). Do not run rtl_test while the service is active.\n", si.Unit)
 		}
 	}

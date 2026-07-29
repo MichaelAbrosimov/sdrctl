@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -82,6 +83,7 @@ type UnitStatus struct {
 	Enabled  string // enabled | disabled | static | ... | not-installed | unknown
 	Restarts string // NRestarts counter
 	Since    string // ActiveEnterTimestamp
+	MainPID  int    // 0 when the unit is not running
 }
 
 // UnitStatus queries a single unit. Errors degrade to "unknown" fields so a
@@ -89,7 +91,7 @@ type UnitStatus struct {
 func (c *Client) UnitStatus(ctx context.Context, unit string) UnitStatus {
 	st := UnitStatus{Unit: unit, Load: "unknown", Active: "unknown", Enabled: "unknown"}
 	out, err := c.run(ctx, "systemctl", "show", unit, "--no-pager",
-		"-p", "LoadState,ActiveState,UnitFileState,NRestarts,ActiveEnterTimestamp")
+		"-p", "LoadState,ActiveState,UnitFileState,NRestarts,ActiveEnterTimestamp,MainPID")
 	if err != nil {
 		return st
 	}
@@ -109,6 +111,8 @@ func (c *Client) UnitStatus(ctx context.Context, unit string) UnitStatus {
 			st.Restarts = val
 		case "ActiveEnterTimestamp":
 			st.Since = val
+		case "MainPID":
+			st.MainPID, _ = strconv.Atoi(val)
 		}
 	}
 	if st.Load == "not-found" {
@@ -176,6 +180,23 @@ func (c *Client) PendingJobs(ctx context.Context) (map[string]string, error) {
 func (c *Client) CancelJob(ctx context.Context, id string) error {
 	_, err := c.run(ctx, "systemctl", "cancel", id)
 	return err
+}
+
+// CmdLine returns the actual command line of a running process, read from
+// /proc. `systemctl show -p ExecStart` is not a substitute: it reports the
+// unit file literally, with `$VARS` unexpanded, whereas this is what the
+// process is REALLY running with — including args from an EnvironmentFile
+// that may have been edited without a restart. Empty when unavailable.
+func CmdLine(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return ""
+	}
+	parts := strings.FieldsFunc(string(raw), func(r rune) bool { return r == 0 })
+	return strings.Join(parts, " ")
 }
 
 // Logs returns the last n journal lines of a unit.

@@ -46,6 +46,10 @@ type ServiceDetail struct {
 	Restarts string `json:"restarts,omitempty"`
 	Since    string `json:"since,omitempty"`
 	Optional bool   `json:"optional,omitempty"`
+	// CmdLine is the running process's actual argv (empty when stopped) —
+	// the honest answer to "with which arguments is this mode running",
+	// which the unit file cannot give once an EnvironmentFile is involved.
+	CmdLine string `json:"cmdline,omitempty"`
 }
 
 type DeviceStatus struct {
@@ -205,6 +209,7 @@ func buildDevice(ctx context.Context, dc config.DeviceConfig, sd *systemd.Client
 			Restarts: st.Restarts,
 			Since:    st.Since,
 			Optional: sc.Optional,
+			CmdLine:  systemd.CmdLine(st.MainPID),
 		}
 		if sc.Port != 0 {
 			ds.Ports[name] = sc.Port
@@ -490,6 +495,11 @@ func SetMode(ctx context.Context, sd *systemd.Client, dev *config.DeviceConfig, 
 			}
 			return res, fmt.Errorf("disable %s: %w", sc.Systemd, err)
 		}
+		// SDR processes routinely exit non-zero when told to stop (rtl_tcp
+		// exits 1 on SIGTERM), so systemd parks the unit we just LEFT in
+		// "failed". Reporting a mode nobody asked for as failed is noise:
+		// clear it, the journal keeps the history.
+		_ = sd.ResetFailed(transCtx, sc.Systemd)
 	}
 
 	if target != ModeIdle {

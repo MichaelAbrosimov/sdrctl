@@ -393,6 +393,23 @@ func TestSetModeRejectsUnknownAndMissing(t *testing.T) {
 	}
 }
 
+// Field finding: rtl_tcp exits 1 on SIGTERM, so the unit we just left is
+// parked in "failed" and shows up that way in status. A deliberately
+// stopped mode must not be reported as failed.
+func TestSetModeClearsFailedStateOfLeftMode(t *testing.T) {
+	f := systemdtest.New(map[string]*systemdtest.Unit{
+		"rtl-tcp.service": {Load: "loaded", Active: "inactive", Enabled: "disabled"},
+		"rtl-433.service": {Load: "loaded", Active: "active", Enabled: "enabled"},
+	})
+
+	if _, err := SetMode(context.Background(), f.Client(), testDevice(), "rtl-tcp", 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(f.Calls(), "\n"), "reset-failed rtl-433.service") {
+		t.Errorf("left-behind unit keeps its failed marker:\n%s", strings.Join(f.Calls(), "\n"))
+	}
+}
+
 // SDR-P1-02: a failing disable of an installed unit must abort the
 // transition even when that unit is not running.
 func TestSetModeAbortsWhenDisableFails(t *testing.T) {
