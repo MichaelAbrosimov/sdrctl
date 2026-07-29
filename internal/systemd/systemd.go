@@ -187,6 +187,12 @@ func (c *Client) CancelJob(ctx context.Context, id string) error {
 // unit file literally, with `$VARS` unexpanded, whereas this is what the
 // process is REALLY running with — including args from an EnvironmentFile
 // that may have been edited without a restart. Empty when unavailable.
+//
+// Caveat worth knowing when the output looks odd: this is the process's
+// CURRENT argv, and a process may rewrite it in place. rtl_433 parses
+// `-F mqtt://host:port` destructively, overwriting the colon with a NUL,
+// so /proc reports host and port as two arguments (byte length unchanged —
+// the giveaway). We report what the kernel reports rather than guessing.
 func CmdLine(pid int) string {
 	if pid <= 0 {
 		return ""

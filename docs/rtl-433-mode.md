@@ -25,6 +25,13 @@ RTL433_ARGS=-C si -F kv -F mqtt://pi5.lab:1883
 - `-R -<protocol>` — disable a protocol; the practical use is silencing
   false positives (below).
 
+`sdrctl device` prints the running process's real argv, and for this mode it
+looks mangled: `-F mqtt://pi5.lab 1883` instead of `…pi5.lab:1883`. Nothing
+is broken — rtl_433 parses the URL destructively in its own argv (the colon
+is overwritten with a NUL, total length unchanged), so the kernel reports
+host and port as two arguments. The journal line `MQTT: Publishing MQTT data
+to <host> port <port>` is the authoritative confirmation.
+
 ## What the data looks like
 
 Cheap ISM sensors are one-way: no acknowledgements, no encryption (except
