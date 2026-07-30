@@ -95,17 +95,50 @@ mode instead.
 | Flag | Effect |
 |---|---|
 | `-V` | verbose decoded frames |
-| `-Q <0..2>` | strictness (lower = more junk but more weak aircraft) |
+| `-Q <0..2>` | timing strictness (NOT a CRC check) |
 | `-e <n>` | tolerated errors per frame |
 | `-S` | show short frames |
 
+**It does not validate frames at all** — see the integrity section below.
+Alone it cannot answer "are there aircraft?"; pipe it through a CRC filter:
+
 ```sh
-rtl_adsb -V -Q 0.5
+rtl_adsb -g 49 | python3 ~/adsb-crc.py     # only CRC-valid frames survive
 ```
 
-Use: settle in ten minutes whether any aircraft are receivable at all —
-before installing readsb or re-tuning the antenna. Too bare for permanent
-duty (no network feed, no map): that is `readsb`'s job.
+Too bare for permanent duty (no network feed, no map): that is `readsb`'s
+job, and readsb does check CRC itself.
+
+## Trust the integrity field, not the output
+
+Field lesson (2026-07-30). `rtl_adsb` on 1090 MHz produced a steady stream
+of plausible-looking frames on a node whose airspace is closed to civil
+aviation. All of it was noise:
+
+- **0 of 64 frames passed the Mode S CRC.** Real frames always check out.
+- **The downlink formats were uniformly spread over DF16–DF31.** Real
+  traffic is ~95 % DF17 plus DF11/4/5/20; DF22–31 do not occur.
+- **64 frames, 64 distinct ICAO addresses.** One real aircraft sends
+  several messages per second under the SAME address.
+
+The mechanism: rtl_adsb sees a burst, reads the first bit, and if it is 1
+declares a 112-bit "long frame" and prints it verbatim. With automatic gain
+on 1090 MHz, noise supplies such bursts constantly.
+
+So the rule when judging any decoder: **check whether it verifies
+integrity, and only then believe its output.**
+
+- `rtl_433` prints `Integrity: CRC | CHECKSUM | PARITY` per decode — that
+  is why we trust it, and why PARITY-only protocols still leak noise (the
+  "Govee-Water" ghost in docs/rtl-433-mode.md).
+- `rtl_adsb` prints nothing of the sort because it verifies nothing.
+- `rtl_power` makes no claims at all: it reports loudness, and loudness is
+  always "true".
+
+A validated CRC checker lives on the node at `~/adsb-crc.py` (its own
+correctness is verified against the canonical `8D4840D6…` reference frame
+and a deliberately corrupted copy — validate the tool before trusting the
+verdict).
 
 ## Service tools — not modes
 
