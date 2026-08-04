@@ -411,14 +411,7 @@ type SetModeResult struct {
 }
 
 // ModeNames lists selectable modes of a device (services + idle).
-func ModeNames(dev *config.DeviceConfig) []string {
-	names := make([]string, 0, len(dev.Services)+1)
-	for name := range dev.Services {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return append(names, ModeIdle)
-}
+func ModeNames(dev *config.DeviceConfig) []string { return dev.ModeNames() }
 
 // verifyPollInterval is the pause between verification reads in SetMode.
 const verifyPollInterval = 300 * time.Millisecond
@@ -455,6 +448,15 @@ func SetMode(ctx context.Context, sd *systemd.Client, dev *config.DeviceConfig, 
 	defer transCancel()
 
 	res := SetModeResult{Device: dev.ID, RequestedMode: target}
+
+	// Accept what a human types (rtl_tcp, TCP, 433) and work with the
+	// canonical name from here on — the result must report the mode that
+	// was actually set, not the shorthand.
+	canonical, err := dev.ResolveMode(target)
+	if err != nil {
+		return res, err
+	}
+	target = canonical
 
 	var targetUnit string
 	if target != ModeIdle {

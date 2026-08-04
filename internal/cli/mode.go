@@ -102,6 +102,15 @@ func printMode(cfg *config.Config, dev *config.DeviceConfig) error {
 // journal of the device's units is streamed while it runs; piped output
 // stays the single result line scripts expect. --follow/--quiet override.
 func runModeSet(cfg *config.Config, dev *config.DeviceConfig, target string) error {
+	// Resolve locally first: the agent would reject a bad name anyway, but
+	// doing it here means no misleading "requesting mode <typo>" line, and
+	// an accepted shorthand is echoed as the real mode.
+	canonical, err := dev.ResolveMode(target)
+	if err != nil {
+		return fmt.Errorf("%s: %w", dev.ID, err)
+	}
+	target = canonical
+
 	live := followMode || (stdoutIsTTY() && !quietMode)
 	// The unit linger waits for; empty for idle, which starts nothing.
 	targetUnit := ""
@@ -110,6 +119,7 @@ func runModeSet(cfg *config.Config, dev *config.DeviceConfig, target string) err
 	}
 
 	var fol *follower
+	var res core.SetModeResult
 	started := time.Now()
 	if live {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -125,7 +135,7 @@ func runModeSet(cfg *config.Config, dev *config.DeviceConfig, target string) err
 		}
 	}
 
-	res, err := agentclient.New(cfg.Socket.Path, cfg.ModeSetTimeout()).SetMode(dev.ID, target)
+	res, err = agentclient.New(cfg.Socket.Path, cfg.ModeSetTimeout()).SetMode(dev.ID, target)
 	switch {
 	case err == nil:
 		return reportModeSet(res, fol, started, live, targetUnit)

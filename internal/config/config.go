@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -525,6 +526,56 @@ func (c *Config) RestoreCooldown() time.Duration {
 		return defaultRestoreCooldownSec * time.Second
 	}
 	return time.Duration(c.Observer.RestoreCooldownSec) * time.Second
+}
+
+// ModeNames lists the selectable modes of a device: its services plus idle.
+func (d *DeviceConfig) ModeNames() []string {
+	names := make([]string, 0, len(d.Services)+1)
+	for name := range d.Services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return append(names, "idle")
+}
+
+// ResolveMode turns what a human typed into a mode name of this device.
+//
+// The spellings people actually use are accepted: the underlying binaries
+// are called rtl_tcp and rtl_433, so `rtl_tcp` must reach the `rtl-tcp`
+// mode, and an unambiguous shorthand (`tcp`, `433`) should work like it
+// does in every other modern CLI. Ambiguity is never guessed — it is
+// reported with the candidates. Failure always lists what IS available:
+// an error that only says "unknown" makes the user guess twice.
+func (d *DeviceConfig) ResolveMode(input string) (string, error) {
+	modes := d.ModeNames()
+	norm := func(s string) string {
+		return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(s)), "_", "-")
+	}
+	want := norm(input)
+	if want == "" {
+		return "", fmt.Errorf("no mode given (available: %s)", strings.Join(modes, ", "))
+	}
+
+	var prefix, substr []string
+	for _, m := range modes {
+		switch n := norm(m); {
+		case n == want:
+			return m, nil // exact wins outright
+		case strings.HasPrefix(n, want):
+			prefix = append(prefix, m)
+		case strings.Contains(n, want):
+			substr = append(substr, m)
+		}
+	}
+	for _, cand := range [][]string{prefix, substr} {
+		if len(cand) == 1 {
+			return cand[0], nil
+		}
+		if len(cand) > 1 {
+			return "", fmt.Errorf("mode %q is ambiguous: %s", input, strings.Join(cand, ", "))
+		}
+	}
+	return "", fmt.Errorf("unknown mode %q (available: %s)", input, strings.Join(modes, ", "))
 }
 
 // DeviceByID looks a device up by its logical id.

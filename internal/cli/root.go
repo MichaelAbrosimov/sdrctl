@@ -4,6 +4,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -31,6 +32,18 @@ func Execute() {
 }
 
 func init() {
+	// pflag turns `-help` into `-h -e -l -p` and reports "unknown shorthand
+	// flag: 'e' in -elp", which tells the user nothing. `-?` is equally
+	// natural to type. Both now lead to the help text instead of a riddle.
+	rootCmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+		if msg := err.Error(); strings.Contains(msg, "'?'") ||
+			strings.Contains(msg, "in -elp") || strings.Contains(msg, "in -help") {
+			return c.Help()
+		}
+		return fmt.Errorf("%v\n\nRun '%s --help' (two dashes) to see the available flags",
+			err, c.CommandPath())
+	})
+
 	rootCmd.PersistentFlags().StringVar(&cfgPath, "config", config.DefaultPath, "path to config file")
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "version",

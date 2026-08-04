@@ -222,20 +222,23 @@ func (s *Server) handleSocketSetModeDevice(w http.ResponseWriter, r *http.Reques
 }
 
 // resolveTarget validates the device id and mode name, writing the error
-// response itself when validation fails.
-func (s *Server) resolveTarget(w http.ResponseWriter, id, mode string) *config.DeviceConfig {
+// response itself when validation fails. It returns the CANONICAL mode
+// name, so an accepted shorthand ("tcp", "rtl_tcp") is executed, logged
+// and reported as the real one.
+func (s *Server) resolveTarget(w http.ResponseWriter, id, mode string) (*config.DeviceConfig, string) {
 	dev, err := s.cfg.DeviceByID(id)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "%v", err)
-		return nil
+		return nil, ""
 	}
-	if mode != core.ModeIdle {
-		if _, ok := dev.Services[mode]; !ok {
-			writeErr(w, http.StatusBadRequest, "unknown mode %q for device %s", mode, id)
-			return nil
-		}
+	canonical, err := dev.ResolveMode(mode)
+	if err != nil {
+		// The message names every available mode: an error that only says
+		// "unknown" makes the caller guess twice.
+		writeErr(w, http.StatusBadRequest, "device %s: %v", id, err)
+		return nil, ""
 	}
-	return dev
+	return dev, canonical
 }
 
 // beginTransition maps the coordinator's verdict to an HTTP status; the
@@ -294,7 +297,7 @@ func (s *Server) setMode(w http.ResponseWriter, r *http.Request, id, mode string
 		return
 	}
 
-	dev := s.resolveTarget(w, id, mode)
+	dev, mode := s.resolveTarget(w, id, mode)
 	if dev == nil {
 		return
 	}
@@ -348,7 +351,7 @@ func (s *Server) setMode(w http.ResponseWriter, r *http.Request, id, mode string
 // setModeSync is the socket write path: trusted (file permissions instead of
 // a token) and synchronous — the CLI wants the final result, not a ticket.
 func (s *Server) setModeSync(w http.ResponseWriter, id, mode string) {
-	dev := s.resolveTarget(w, id, mode)
+	dev, mode := s.resolveTarget(w, id, mode)
 	if dev == nil {
 		return
 	}

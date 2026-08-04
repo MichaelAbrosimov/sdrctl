@@ -410,3 +410,37 @@ func TestTimingHelpersFallBackOnHandBuiltConfig(t *testing.T) {
 			cfg.ModeSetTimeout(), cfg.RestoreCooldown())
 	}
 }
+
+// UX finding (2026-08-03): the underlying binaries are called rtl_tcp and
+// rtl_433, so users type underscores; and a unique shorthand should work.
+// An unknown name must list what IS available — an error that only says
+// "unknown" makes the user guess twice.
+func TestResolveMode(t *testing.T) {
+	dev := &DeviceConfig{ID: "rtl-sdr-01", Services: map[string]ServiceConfig{
+		"rtl-tcp": {Systemd: "rtl-tcp.service"}, "rtl-433": {Systemd: "rtl-433.service"},
+		"spyserver": {Systemd: "spyserver.service"},
+	}}
+	for in, want := range map[string]string{
+		"rtl-tcp": "rtl-tcp", "rtl_tcp": "rtl-tcp", "RTL_TCP": "rtl-tcp", " rtl-tcp ": "rtl-tcp",
+		"tcp": "rtl-tcp", "433": "rtl-433", "spy": "spyserver", "idle": "idle", "i": "idle",
+	} {
+		got, err := dev.ResolveMode(in)
+		if err != nil || got != want {
+			t.Errorf("ResolveMode(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	// "rtl" prefixes two modes — guessing would be worse than asking.
+	if _, err := dev.ResolveMode("rtl"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Errorf("ambiguous shorthand accepted or unexplained: %v", err)
+	}
+	// The unknown-mode error must list the alternatives.
+	_, err := dev.ResolveMode("nope")
+	if err == nil {
+		t.Fatal("unknown mode accepted")
+	}
+	for _, m := range []string{"rtl-tcp", "rtl-433", "spyserver", "idle"} {
+		if !strings.Contains(err.Error(), m) {
+			t.Errorf("error does not list %q: %v", m, err)
+		}
+	}
+}
