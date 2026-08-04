@@ -35,8 +35,10 @@ stage="$remote_home/sdrctl-deploy"
 echo "    $remote_user@$HOST, staging in $stage"
 
 echo "==> staging"
-# COPYFILE_DISABLE keeps macOS from shipping ._AppleDouble junk.
-COPYFILE_DISABLE=1 tar -C "$REPO" -cf - \
+# macOS tags files with a com.apple.provenance xattr that GNU tar on the
+# node then complains about for every file; --no-xattrs drops it at the
+# source (COPYFILE_DISABLE separately suppresses ._AppleDouble members).
+COPYFILE_DISABLE=1 tar -C "$REPO" --no-xattrs -cf - \
     --exclude '.*' \
     -s '|^bin/sdrctl-linux-amd64$|sdrctl|' \
     -s '|^systemd/||' -s '|^polkit/||' -s '|^scripts/||' \
