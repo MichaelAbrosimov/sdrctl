@@ -140,6 +140,47 @@ correctness is verified against the canonical `8D4840D6…` reference frame
 and a deliberately corrupted copy — validate the tool before trusting the
 verdict).
 
+## A negative result is a claim about the instrument first
+
+Field lesson (2026-09-21, the 868 MHz survey). Thirty minutes on 868.95
+produced zero events, and the number was worthless four times over before
+it meant anything:
+
+1. **Wrong bandwidth.** `-s 1024k` while decoder 104 (wM-Bus Mode C&T)
+   documents `-s 1200k` for its 100 kbps signalling.
+2. **Wrong centre.** Modes S and T live on 868.3, not 868.95 — they were
+   outside the captured band entirely.
+3. **Wrong antenna.** A 144/433 dipole at 868 is badly mismatched; λ/4 here
+   is 8.2 cm.
+4. **Device contention.** A control run launched while the survey still
+   held the dongle reported zero because it never got the device — the
+   number measured a collision, not the air.
+
+Each was invisible in the output: rtl_433 exits 0 and writes an empty file
+in all four cases, exactly as it does for a genuinely quiet band.
+
+**So every zero needs a positive control — a signal known to be present,
+measured through the same chain.** Rules that follow:
+
+- **Validate what actually changed.** After the antenna was re-cut for 868,
+  the antenna is the suspect; re-running the survey proves nothing.
+- **The control must not depend on a source that can be legitimately
+  absent.** TPMS on 433.92 was the daytime baseline (2 events / 5 min), but
+  a 15-minute repeat at 01:00 caught nothing — TPMS transmits only while
+  wheels turn. The validator failed for reasons unrelated to the rig.
+- **Prefer a control that is always on air.** Broadcast FM works at any
+  hour: `rtl_power -f 88M:108M:100k -i 10 -1` and look for *discrete peaks
+  at station frequencies* (here ~33 dB over a −32 dB floor). A flat rise is
+  not proof; stray FM couples into a dongle with no antenna at all.
+- **Know each control's reach.** FM clears the tuner, USB and sample path.
+  It does NOT prove the antenna is connected — only a band where the
+  antenna is matched can do that.
+
+Verdict recorded with its own caveat: 868 measured clean on the second
+attempt (C&T at 1200k, S+T at 868.3, matched 8.2 cm dipole) and both passes
+were empty — but the antenna connection is still unconfirmed, so the result
+is pending a daytime 433 control.
+
 ## Service tools — not modes
 
 | Command | Purpose | When |
@@ -157,7 +198,7 @@ verdict).
 | rtl-tcp | mode (exists) | long-running service |
 | rtl-433 on 433 MHz | mode (exists) | proven value |
 | rtl-433 + 868 via `-H` | PROFILE of the same mode | one env line, no code; costs missed packets |
-| 868 as its own mode | mode | only if 868 proves more valuable than hopping |
+| 868 as its own mode | **not justified** | two clean 15-min passes (C&T, S+T) caught nothing; pending the 433 control above |
 | survey (rtl_power) | **job** | it ends; returns via `Conflicts=` + auto_restore |
 | IQ recording (rtl_sdr) | job | same shape, different tool |
 | ADS-B (readsb) | mode — but test with `rtl_adsb` first | pointless if no aircraft are receivable |
