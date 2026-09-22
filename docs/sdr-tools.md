@@ -176,10 +176,65 @@ measured through the same chain.** Rules that follow:
   It does NOT prove the antenna is connected — only a band where the
   antenna is matched can do that.
 
-Verdict recorded with its own caveat: 868 measured clean on the second
-attempt (C&T at 1200k, S+T at 868.3, matched 8.2 cm dipole) and both passes
-were empty — but the antenna connection is still unconfirmed, so the result
-is pending a daytime 433 control.
+The caveat turned out to matter. Both wM-Bus passes were empty and the
+verdict was written as "868 is quiet" — then the operator looked at the
+same antenna in SDR++ the next morning and saw obvious digital traffic.
+The band was never empty; see the next section. **A zero that survives a
+control is still only a zero for the decoders you ran.**
+
+## 868 MHz: what is actually there
+
+Investigated 2026-09-22 from a 120 s IQ capture (868.3 MHz, 1.024 Msps,
+235 MB), not from live listening — a recording can be re-examined with any
+tool, any number of times, and does not depend on somebody transmitting
+while you happen to be watching. Two 15-minute live passes had found
+nothing; the recording found 48 bursts in two minutes.
+
+**Measured, with validated tools:**
+
+| Property | Value |
+|---|---|
+| Channels | 868.10 and 868.50 (±200 kHz from the capture centre) |
+| Packet length | 10–16 ms |
+| Modulation | 2-FSK, deviation 30–33 kHz |
+| Symbol rate | ~19.7 kbaud measured; 13⅓ samples = **19.2 kbaud** exactly, a standard rate |
+| Frame | 32–40 bit alternating preamble, 18-bit sync `010001111010011111`, then 111–153 bits of payload |
+| Repetition | groups every 25–34 s, the same packet sent on both channels ~100 ms apart |
+| Long transmissions | 1.1 / 2.1 / 3.6 s, narrowband, on 868.10 — unexplained |
+
+Four of five demodulated packets share preamble and sync exactly, with
+different payloads: one protocol, one device family, real data. **It is not
+LoRa** — chirp ramp scores 0.46–0.58 against 0.88–0.98 for reference chirps.
+**It is none of rtl_433's 269 protocols**, checked both on the raw capture
+and on the channel shifted to DC, so the misses are not a tuning artefact.
+What the devices are is still unknown; the pattern (short packet, duplicated
+across channels, a ping every half minute) fits security sensors, but that
+is a guess and is recorded as one.
+
+Tools for this live in `tools/iq/` and each one is validated against
+`mksynth.py`, a capture with known contents:
+
+- `iqscan.py` — bursts, bandwidth, and chirp-vs-not per burst
+- `chan.py` — shift + filter + decimate one channel out of a capture
+- `fsk.py` — 2-FSK demodulator; prints levels, symbol rate and bits
+
+**Every one of these failed its first reference run.** The chirp detector
+demanded a retrace larger than the signal could physically make; the
+bandwidth estimate returned the whole band at low SNR; the symbol-rate
+estimator failed three separate ways (shortest run, autocorrelation, eye
+opening) before the real cause turned up — the instantaneous frequency was
+smoothed over 4 µs while the symbol lasted 500 µs, so noise shattered every
+symbol and no downstream estimator could recover. Fixing the input fixed
+all three. `fsk.py` finally recovered 60 of 60 known bits exactly.
+
+Two rules earned here:
+
+- **Tune the input before the criterion.** Three different estimators
+  failing the same way is evidence about the data path, not the estimator.
+- **Isolate the channel before decoding.** With both 868.10 and 868.50 in
+  band, rtl_433's FSK demodulator took one peak from each channel as mark
+  and space. Shifting alone does not fix this; filtering does, and it
+  bought ~6 dB of SNR as well.
 
 ## Service tools — not modes
 
@@ -198,7 +253,8 @@ is pending a daytime 433 control.
 | rtl-tcp | mode (exists) | long-running service |
 | rtl-433 on 433 MHz | mode (exists) | proven value |
 | rtl-433 + 868 via `-H` | PROFILE of the same mode | one env line, no code; costs missed packets |
-| 868 as its own mode | **not justified** | two clean 15-min passes (C&T, S+T) caught nothing; pending the 433 control above |
+| 868 as its own mode | **open again** | the band carries regular 2-FSK traffic (see above); worth a mode once the protocol is identified, not before |
+| IQ capture + offline analysis | **job, and the most valuable one** | it found in 120 s what 30 min of live listening missed, and the file can be re-decoded forever |
 | survey (rtl_power) | **job** | it ends; returns via `Conflicts=` + auto_restore |
 | IQ recording (rtl_sdr) | job | same shape, different tool |
 | ADS-B (readsb) | mode — but test with `rtl_adsb` first | pointless if no aircraft are receivable |
