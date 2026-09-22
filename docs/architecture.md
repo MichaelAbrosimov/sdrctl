@@ -131,6 +131,95 @@ transition (potentially ~10 s) runs in background; one transition per device
 at a time. The outcome arrives via `GET /status` and MQTT retained topics +
 events. The CLI uses the same transition code but waits and prints the result.
 
+## Modes, jobs and concurrency
+
+**Status: agreed design, not yet implemented.** Modes exist today; jobs do
+not. Recorded here because the question "what happens if I ask twice" came
+up twice and deserves an answer in the repo rather than in a chat log.
+
+### Two kinds of claim on a device
+
+`rtlsdr_open()` is exclusive: one process owns a dongle at a time. Every
+concept below exists to model that one physical fact honestly.
+
+| | **Mode** | **Job** |
+|---|---|---|
+| Duration | indefinite | bounded, ends by itself |
+| `enabled` (desired) | yes — this IS the mode | **never** |
+| `active` | yes | yes, temporarily |
+| Survives reboot | yes | no, and must not |
+| On finish | nothing, keeps running | device returns to its mode |
+| Examples | `rtl-tcp`, `rtl-433` | `survey`, `capture`, satellite pass |
+
+A job is a systemd unit too (`capture@.service`), carrying the same
+`Conflicts=` as the mode units. Exclusivity is then enforced by systemd, not
+by the correctness of our code, and `RuntimeMaxSec=` bounds the job without
+a watchdog of our own.
+
+### Parameters belong to the mode's identity
+
+A mode is not "rtl-433 plus a frequency stored somewhere": that somewhere
+would be a second source of truth, and removing the first one (`state.json`)
+is what made this design work. Parameters go into the unit instance name:
+
+```text
+rtl-433@433.service   enabled    <- the desired state includes the frequency
+rtl-433@868.service   disabled
+```
+
+`rtl-433` is a family; the mode is one member of it. `Conflicts=` must
+therefore cover instances of the same template, or two frequencies would
+race for one dongle. `sdrctl status` always names the member, never the
+family — "rtl-433" while 868 is running would be a half-truth.
+
+### A job never restores anything
+
+The obvious design is "remember the mode, run, put it back". It is fragile:
+whoever remembers has to survive to the end. Instead:
+
+```text
+job stops    active     (systemctl stop)
+job leaves   enabled    untouched
+```
+
+There is then nothing to restore. Desired state never changed, so the
+existing `auto_restore` sees enabled-but-inactive and converges. Kill the
+agent mid-job, lose power, drop the ssh session — the node still comes back
+to its mode, because the intent lives in systemd rather than in a process's
+memory.
+
+### Concurrency
+
+`BeginTransition` today refuses a second concurrent change
+("mode change already in progress"). That stays the rule for jobs; for
+modes it becomes last-write-wins, because a mode is a declared intent and
+the newest declaration supersedes the older one. Writing `enabled` is
+instant and idempotent, and a single serialized worker converges `active`
+toward whatever `enabled` says when its iteration starts — so **`enabled`
+is the queue**, depth one, with no new state to store.
+
+| In progress | Requested | Behaviour |
+|---|---|---|
+| mode change | another mode | last wins; superseded intents are dropped |
+| mode change | job | job waits out the transition (bounded by `mode_set_timeout_sec`) |
+| job | mode change | `enabled` updates now, applies when the job ends; work is not cut short |
+| job | another job | refused, naming the running job and its remaining time (`--wait` to queue) |
+
+The third row needs no code of its own: a job does not touch `enabled`, a
+mode change touches only `enabled`, and `auto_restore` closes the gap. Two
+unrelated mechanisms compose because both rest on the `active`/`enabled`
+split.
+
+Open items before implementing:
+
+- **Ping-pong.** Last-write-wins lets rapid commands thrash the dongle.
+  systemd's `StartLimit*` and our `restore_cooldown_sec` already throttle;
+  verify the converging worker does not fight them.
+- **`--follow` during a supersede.** The follower must say "superseded by a
+  newer request" instead of silently tailing someone else's transition.
+- **Cancellation.** `sdrctl job cancel` must be a plain `systemctl stop`, so
+  the return path is identical to a normal finish.
+
 ## MQTT boundary rule
 
 ```text
