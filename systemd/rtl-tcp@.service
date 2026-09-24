@@ -1,23 +1,36 @@
-# Multi-device rtl_tcp template; instance name = sdrctl device id,
-# e.g. rtl-tcp@rtl-sdr-01.service.
-# Install: cp systemd/rtl-tcp@.service /etc/systemd/system/
-#          cp configs/device.env.example /etc/sdrctl/devices/rtl-sdr-01.env
+# rtl_tcp IQ transport, one instance per PROFILE: rtl-tcp@main.service.
+#
+# CHANGED 2026-09-24: %i used to be the sdrctl device id. It is now a profile
+# id, matching rtl-433@.service — one meaning of %i across the project. A
+# profile that serves a specific dongle simply pins it in DEVICE_ARGS, so the
+# multi-device case is covered without a second instance axis.
+#
+# Install:
+#   cp systemd/rtl-tcp@.service /etc/systemd/system/
+#   mkdir -p /etc/sdrctl/profiles/rtl-tcp
+#   cp configs/profiles/rtl-tcp/main.env /etc/sdrctl/profiles/rtl-tcp/
+#   # plus the BindsTo drop-in on the template (see rtl-433@.service header).
 [Unit]
-Description=rtl_tcp SDR server (%i)
+Description=rtl_tcp SDR server (profile %i)
 After=network-online.target
 Wants=network-online.target
-Conflicts=rtl-433@%i.service spyserver@%i.service
+Conflicts=rtl-433.service spyserver.service
 StartLimitBurst=3
 StartLimitIntervalSec=120
-# Optional: bind the instance to the physical dongle so systemd stops it
-# immediately on unplug — see udev/99-sdrctl-rtlsdr.rules for the drop-in.
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/sdrctl/devices/%i.env
-ExecStart=/usr/bin/rtl_tcp -a ${LISTEN_ADDR} -p ${PORT} ${DEVICE_ARGS}
+Environment=SDR_LOCK=/run/lock/sdrctl-rtl-sdr-01.lock
+Environment=LISTEN_ADDR=0.0.0.0 PORT=1234 DEVICE_ARGS=
+# No leading '-': a missing profile must FAIL the unit, not start it with
+# empty arguments. Defaults here would bind the wrong port just as silently.
+EnvironmentFile=/etc/sdrctl/profiles/rtl-tcp/%i.env
+ExecStart=/usr/bin/flock -n ${SDR_LOCK} /usr/bin/rtl_tcp -a ${LISTEN_ADDR} -p ${PORT} ${DEVICE_ARGS}
 Restart=on-failure
 RestartSec=10
+# rtl_tcp with a dead USB handle ignores SIGTERM; never let a stop drain for
+# the default 90 s (field-verified, see udev/99-sdrctl-rtlsdr.rules).
+TimeoutStopSec=5
 
 [Install]
 WantedBy=multi-user.target

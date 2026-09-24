@@ -60,15 +60,28 @@ mode_set_timeout_sec: 15
 # one implicit default device "rtl-sdr-01". Service keys are the mode names.
 
 services:
+  # Mode names may be plain units or template instances. An instance name is
+  # an opaque PROFILE id: rtl-433@868 means "whatever
+  # /etc/sdrctl/profiles/rtl-433/868.env says". Adding a frequency is then one
+  # env file plus one line here — no unit editing on the node, and the desired
+  # state still lives entirely in systemd's `enabled`.
   rtl-tcp:
     systemd: rtl-tcp.service
     port: 1234
-  rtl-433:
-    systemd: rtl-433.service
+  rtl-433@433:
+    systemd: rtl-433@433.service
+    optional: true
+  rtl-433@868:
+    systemd: rtl-433@868.service
     optional: true
   spyserver:
     systemd: spyserver.service
     optional: true
+
+# Beware the shorthand: with both instances configured, `sdrctl mode rtl-433`
+# is AMBIGUOUS and is refused with both candidates listed, while `sdrctl mode
+# 868` resolves. That is deliberate — a half-named mode would hide which
+# frequency the node actually went to.
 
 # --- Multi-device form -------------------------------------------------------
 # Remove the services block above and describe each dongle explicitly.
@@ -84,7 +97,7 @@ services:
 #     default: true
 #     services:
 #       rtl-tcp:
-#         systemd: "rtl-tcp@rtl-sdr-01.service"
+#         systemd: "rtl-tcp@main.service"      # profile pins -d in its env
 #         port: 1234
 #   - id: rtl-sdr-02
 #     type: rtl-sdr
@@ -93,8 +106,12 @@ services:
 #     optional: true           # missing optional device never breaks global health
 #     services:
 #       rtl-tcp:
-#         systemd: "rtl-tcp@rtl-sdr-02.service"
+#         systemd: "rtl-tcp@second.service"    # its env pins the other dongle
 #         port: 1235
-#       rtl-433:
-#         systemd: "rtl-433@rtl-sdr-02.service"
+#       rtl-433@868:
+#         systemd: "rtl-433@868-second.service"
 #         optional: true
+#
+# Device selection is a PROFILE parameter (DEVICE_ARGS=-d <index>), not a
+# second instance axis: one meaning of %i everywhere keeps unit names and
+# drop-ins predictable.

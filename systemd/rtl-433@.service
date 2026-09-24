@@ -1,0 +1,54 @@
+# rtl_433 decoder, one instance per PROFILE: rtl-433@868.service.
+#
+# The instance name is an opaque profile id; what it means is defined by
+# /etc/sdrctl/profiles/rtl-433/<profile>.env. Frequency, sample rate, decoder
+# set, output — all of it lives there, so a new profile costs one env file
+# and one line in config.yaml, with no unit editing on the node.
+#
+# Why the instance and not an env var on a single unit: the desired mode has
+# to survive a reboot, and `enabled` is the only place this project keeps
+# desired state. A frequency stored beside the unit would be a second source
+# of truth — exactly the thing removing state.json got rid of.
+#
+# Install:
+#   cp systemd/rtl-433@.service /etc/systemd/system/
+#   mkdir -p /etc/sdrctl/profiles/rtl-433
+#   cp configs/profiles/rtl-433/868.env /etc/sdrctl/profiles/rtl-433/
+#   # REQUIRED, once per template - binds every instance to the dongle:
+#   mkdir -p /etc/systemd/system/rtl-433@.service.d
+#   # ...and put the BindsTo drop-in there (see udev/99-sdrctl-rtlsdr.rules).
+#   # A drop-in on the TEMPLATE applies to all of its instances.
+[Unit]
+Description=rtl_433 decoder (profile %i)
+After=network-online.target
+Wants=network-online.target
+# Cross-family exclusion only. systemd cannot express "conflicts with my own
+# other instances" — Conflicts= takes literal names, and a template cannot
+# enumerate its siblings. Two defences cover that gap instead:
+#   1. sdrctl disables every other configured service of the device on each
+#      transition (core.SetMode), which is what actually switches modes;
+#   2. the flock below, which stops a hand-run `systemctl start` of a second
+#      instance from fighting over the dongle.
+Conflicts=rtl-tcp.service spyserver.service
+StartLimitBurst=3
+StartLimitIntervalSec=120
+
+[Service]
+Type=simple
+# SDR_LOCK is per DEVICE, not per profile: that is the resource being
+# guarded. Every unit touching the same dongle must name the same file.
+Environment=SDR_LOCK=/run/lock/sdrctl-rtl-sdr-01.lock
+Environment=RTL433_ARGS=
+# No leading '-': a missing profile must FAIL the unit, not start it with
+# empty arguments. rtl_433 with no args happily listens on its default
+# 433.92 MHz, which would be a silent wrong-frequency mode.
+EnvironmentFile=/etc/sdrctl/profiles/rtl-433/%i.env
+# flock -n fails immediately rather than queueing: a second claimant should
+# land in `failed` where sdrctl reports it, not wait invisibly for a dongle
+# that may never be released.
+ExecStart=/usr/bin/flock -n ${SDR_LOCK} /usr/bin/rtl_433 $RTL433_ARGS
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

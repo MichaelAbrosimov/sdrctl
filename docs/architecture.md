@@ -133,9 +133,12 @@ events. The CLI uses the same transition code but waits and prints the result.
 
 ## Modes, jobs and concurrency
 
-**Status: agreed design, not yet implemented.** Modes exist today; jobs do
-not. Recorded here because the question "what happens if I ask twice" came
-up twice and deserves an answer in the repo rather than in a chat log.
+**Status: mixed, marked per subsection.** Modes and their parameters are
+implemented; **jobs are not** — no `sdrctl job`, no job units. The
+concurrency rules below describe the intended behaviour once they exist,
+except where a subsection says otherwise. Written down because "what happens
+if I ask twice" came up twice and deserves an answer in the repo rather than
+in a chat log.
 
 ### Two kinds of claim on a device
 
@@ -158,6 +161,8 @@ a watchdog of our own.
 
 ### Parameters belong to the mode's identity
 
+**Status: implemented** (`systemd/rtl-433@.service`, `systemd/rtl-tcp@.service`).
+
 A mode is not "rtl-433 plus a frequency stored somewhere": that somewhere
 would be a second source of truth, and removing the first one (`state.json`)
 is what made this design work. Parameters go into the unit instance name:
@@ -167,10 +172,33 @@ rtl-433@433.service   enabled    <- the desired state includes the frequency
 rtl-433@868.service   disabled
 ```
 
-`rtl-433` is a family; the mode is one member of it. `Conflicts=` must
-therefore cover instances of the same template, or two frequencies would
-race for one dongle. `sdrctl status` always names the member, never the
-family — "rtl-433" while 868 is running would be a half-truth.
+`%i` is an opaque **profile id** project-wide, and what it means is defined
+by `/etc/sdrctl/profiles/<family>/<profile>.env`. Device selection is one of
+those parameters (`DEVICE_ARGS=-d N`), deliberately not a second instance
+axis — one meaning of `%i` keeps unit names and drop-ins predictable, and a
+multi-dongle node just gives each dongle its own profile.
+
+No Go code was needed: `core.SetMode` switches modes by disabling every other
+service configured for the device, so an instance is simply another service
+entry. Two consequences are worth knowing:
+
+- **`Conflicts=` cannot cover siblings of one template.** It takes literal
+  names and a template cannot enumerate its own instances. Cross-family
+  exclusion still comes from `Conflicts=`; within a family, exclusion is
+  sdrctl's transition (which is what actually switches modes) plus
+  `flock -n` on a per-DEVICE lock in `ExecStart`, which stops a hand-run
+  `systemctl start` of a second instance. `flock` fails fast rather than
+  queueing: a second claimant belongs in `failed`, where sdrctl reports it,
+  not waiting invisibly for a dongle that may never be freed.
+- **A drop-in on the template covers every instance.** The `BindsTo` binding
+  that makes replug recovery work is therefore installed once, at
+  `/etc/systemd/system/rtl-433@.service.d/`, not per frequency — but it IS
+  still required, and deploy does not install it (see the install doc).
+
+The shorthand resolver treats instances as ordinary names, so with both
+instances configured `sdrctl mode rtl-433` is **refused as ambiguous** and
+names both candidates, while `sdrctl mode 868` resolves. A half-named mode
+would hide which frequency the node actually went to.
 
 ### A job never restores anything
 
@@ -189,6 +217,9 @@ to its mode, because the intent lives in systemd rather than in a process's
 memory.
 
 ### Concurrency
+
+**Status: partly implemented** — today's refusal is real; last-write-wins is
+not yet built, and jobs do not exist.
 
 `BeginTransition` today refuses a second concurrent change
 ("mode change already in progress"). That stays the rule for jobs; for

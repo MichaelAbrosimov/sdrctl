@@ -444,3 +444,44 @@ func TestResolveMode(t *testing.T) {
 		}
 	}
 }
+
+// Template instances are ordinary mode names, so the shorthand resolver must
+// behave predictably around them: the family alone is ambiguous (refusing is
+// the point — "rtl-433" would hide which frequency the node went to), while
+// anything that picks one instance resolves.
+func TestResolveModeTemplateInstances(t *testing.T) {
+	dev := &DeviceConfig{ID: "rtl-sdr-01", Services: map[string]ServiceConfig{
+		"rtl-tcp":     {Systemd: "rtl-tcp.service"},
+		"rtl-433@433": {Systemd: "rtl-433@433.service"},
+		"rtl-433@868": {Systemd: "rtl-433@868.service"},
+	}}
+
+	for in, want := range map[string]string{
+		"rtl-433@868": "rtl-433@868", // exact
+		"RTL-433@868": "rtl-433@868", // case-insensitive
+		"rtl_433@868": "rtl-433@868", // underscore is a dash
+		"868":         "rtl-433@868", // unique substring
+		"@433":        "rtl-433@433", // the instance suffix alone
+		"tcp":         "rtl-tcp",     // unaffected by the instances
+	} {
+		got, err := dev.ResolveMode(in)
+		if err != nil || got != want {
+			t.Errorf("ResolveMode(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+
+	// "rtl-433" prefixes both instances, and "433" is a substring of both
+	// ("rtl-433@868" contains it in the family part). Both must be refused
+	// naming the candidates, never silently resolved to one of them.
+	for _, in := range []string{"rtl-433", "433"} {
+		got, err := dev.ResolveMode(in)
+		if err == nil {
+			t.Fatalf("ResolveMode(%q) = %q; want an ambiguity error", in, got)
+		}
+		for _, want := range []string{"rtl-433@433", "rtl-433@868"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("ResolveMode(%q) error %q does not name %q", in, err, want)
+			}
+		}
+	}
+}

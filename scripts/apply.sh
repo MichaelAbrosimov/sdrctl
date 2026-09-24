@@ -49,10 +49,23 @@ if install_if_changed "$D/sdrctl-agent.service" /etc/systemd/system/sdrctl-agent
     note "agent unit    → updated"
 fi
 
+# Templates are installed unconditionally: a template cannot run and cannot
+# be enabled on its own — only an instance can, and creating one takes an
+# env file plus a config line, both of which stay the operator's decision.
+# So shipping the template enables nothing behind your back.
+for u in rtl-tcp@.service rtl-433@.service; do
+    [ -f "$D/$u" ] || continue
+    if install_if_changed "$D/$u" "/etc/systemd/system/$u" 0644; then
+        changed_units=1
+        note "$u → updated (template; instances unaffected until restarted)"
+    fi
+done
+
 for u in rtl-tcp.service rtl-433.service spyserver.service; do
     [ -f "$D/$u" ] || continue
-    # A mode unit is only installed if the node already has it: deploy
-    # updates what exists, it does not enable new modes behind your back.
+    # A concrete mode unit is only installed if the node already has it:
+    # deploy updates what exists, it does not enable new modes behind your
+    # back.
     [ -f "/etc/systemd/system/$u" ] || continue
     if install_if_changed "$D/$u" "/etc/systemd/system/$u" 0644; then
         changed_units=1

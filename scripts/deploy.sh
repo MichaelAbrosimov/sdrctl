@@ -44,6 +44,7 @@ COPYFILE_DISABLE=1 tar -C "$REPO" --no-xattrs -cf - \
     -s '|^systemd/||' -s '|^polkit/||' -s '|^scripts/||' \
     bin/sdrctl-linux-amd64 \
     systemd/sdrctl-agent.service systemd/rtl-tcp.service systemd/rtl-433.service \
+    systemd/rtl-tcp@.service systemd/rtl-433@.service \
     polkit/50-sdrctl.rules scripts/apply.sh 2>/dev/null \
   | ssh "$HOST" "rm -rf '$stage' && mkdir -p '$stage' && tar -C '$stage' -xf - && chmod 700 '$stage' && chmod +x '$stage/apply.sh'"
 

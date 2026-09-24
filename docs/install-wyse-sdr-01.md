@@ -144,6 +144,55 @@ Then:
   owner — migrating an old token out of a 0640 config.yaml is mandatory,
   not cosmetic. Keep the node on a trusted LAN — the API has no TLS.
 
+## 8. Adding a parameter profile (templated mode)
+
+A mode's parameters live in the unit INSTANCE name, so a new frequency is an
+env file plus a config line — no unit editing on the node. Deploy ships the
+templates (`rtl-433@.service`, `rtl-tcp@.service`) but deliberately does not
+create instances, profiles or the device binding: those are node decisions.
+
+```sh
+# 1. the profile itself
+sudo mkdir -p /etc/sdrctl/profiles/rtl-433
+sudo cp /path/to/repo/configs/profiles/rtl-433/868.env \
+        /etc/sdrctl/profiles/rtl-433/868.env
+
+# 2. REQUIRED once per template: bind every instance to the dongle, or a
+#    replug will not recover (see udev/99-sdrctl-rtlsdr.rules for why).
+#    A drop-in on the TEMPLATE applies to all of its instances.
+sudo mkdir -p /etc/systemd/system/rtl-433@.service.d
+sudo tee /etc/systemd/system/rtl-433@.service.d/bind.conf >/dev/null <<'CONF'
+[Unit]
+BindsTo=sys-subsystem-usb-devices-rtl\x2dsdr\x2d01.device
+After=sys-subsystem-usb-devices-rtl\x2dsdr\x2d01.device
+[Service]
+TimeoutStopSec=5
+CONF
+sudo systemctl daemon-reload
+
+# 3. make it a selectable mode
+sudo vi /etc/sdrctl/config.yaml     # services: rtl-433@868: {systemd: rtl-433@868.service}
+sudo systemctl restart sdrctl-agent
+
+# 4. use it
+sdrctl mode 868
+```
+
+Gotchas worth knowing before you hit them:
+
+- **The family name stops working as a shorthand.** With `rtl-433@433` and
+  `rtl-433@868` both configured, `sdrctl mode rtl-433` is refused as
+  ambiguous (so is `433`, which is a substring of both). Name the instance,
+  or use the part that is unique — `868`, `@433`.
+- **Migrating off the plain unit.** `rtl-433.service` and `rtl-433@868` are
+  separate units. Disable the old one before configuring the new, or a
+  reboot brings back a mode you thought you had replaced:
+  `sudo systemctl disable --now rtl-433.service`.
+- **A second instance fails fast instead of queueing.** `ExecStart` runs
+  under `flock -n` on a per-device lock, so hand-starting a second profile
+  lands in `failed` rather than fighting for the dongle. That is the
+  intended, visible outcome.
+
 ## Notes
 
 - Never run `rtl_test` while an SDR service is active — one dongle, one owner
